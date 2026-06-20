@@ -27,8 +27,9 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("gander", flag.ContinueOnError)
 	showVersion := fs.Bool("version", false, "print version and exit")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "gander %s — latency diagnostic for Go (PoC)\n\n", version)
-		fmt.Fprintf(fs.Output(), "usage: gander [flags]\n\n")
+		out := fs.Output()
+		_, _ = fmt.Fprintf(out, "gander %s — latency diagnostic for Go (PoC)\n\n", version)
+		_, _ = fmt.Fprint(out, "usage: gander [flags]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
