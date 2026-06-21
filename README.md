@@ -1,63 +1,102 @@
 # gander
 
-> A single-process, low-overhead latency diagnostic for Go: capture the execution
-> trace + kernel/cgroup signals onto **one correlated timeline**, then **tell you
-> what's wrong** — flight-recorder style, triggered on latency anomalies.
+**Find out _why_ your Go service stalled — automatically.**
 
-`gander` ("take a gander" — to look closely) fuses signals that today live in
-separate tools — Go execution traces and kernel/cgroup data (CFS throttling, PSI)
-— onto a single timeline and runs a deterministic rules engine over it. It targets
-latency-sensitive services (pinned hot loops, matching engines, message
-dispatchers) where one slow work-unit stalls everything behind it — the
-head-of-line blocking that aggregate profilers can't show.
+When a unit of work in your program (a request, a loop iteration, a queued
+message) takes longer than it should, `gander` grabs a snapshot of everything
+happening at that moment — the Go execution trace, what the kernel was doing to
+your process (CPU throttling, CPU pressure), and every goroutine's stack — lines
+them all up on one timeline, and tells you in plain findings what went wrong.
 
-Requires **Go 1.25+** (`runtime/trace.FlightRecorder`).
+The name is "take a gander" — to look closely.
 
-## How it works
+It's built for latency-sensitive services where one slow piece of work holds up
+everything behind it — matching engines, message dispatchers, tight hot loops.
+That kind of stall is like one slow checkout lane backing up the whole store:
+average-based profilers say "CPU looks fine," but every customer behind the slow
+one waited. gander is made to catch exactly that.
 
-Two layers, pure Go + `/proc`/cgroup — no eBPF, no `perf`, no special privileges:
+> **Requirements:** Go **1.25+** (it uses the new `runtime/trace.FlightRecorder`).
+> The kernel signals (CPU throttling, CPU pressure) are Linux-only; on other
+> platforms they're simply skipped and everything else still works.
 
-- **Layer 1 — collect + synthesize.** A heartbeat watchdog times each work-unit.
-  When one exceeds its budget, gander snapshots a correlated *bundle*: the
-  flight-recorder execution trace (the lead-up to the stall), cgroup `cpu.stat`
-  (CFS throttling), PSI CPU pressure, and a goroutine dump — aligned onto one
-  clock. `gander emit` renders the bundle as a single **Perfetto** timeline:
-  goroutine lanes labelled by function, wake-up arrows, GC/STW ranges, and the
-  kernel counters as tracks beside them.
-- **Layer 2 — diagnose.** `gander diag` runs a 100%-deterministic rules engine
-  over the bundle and prints scored findings: the missed budget, **the slowest
-  work-unit pinned to its goroutine and block reason**, CFS throttling, CPU
-  pressure, GC stop-the-world share, and a block-reason breakdown.
+## Why gander? (vs. the tools you already have)
 
-## Try it
+When a service is "sometimes slow," each existing tool answers a *different*
+question — and none of them answers "what went wrong, _right at the slow moment_?"
+
+| Tool | Good at | Catches the stall on its own? | Sees kernel CPU throttling / pressure? | Tells you the cause? |
+|------|---------|:---:|:---:|:---:|
+| **pprof** | where CPU/memory goes *on average* | ❌ you sample manually | ❌ | ❌ aggregates, no timeline |
+| **go tool trace** / gotraceui | reading one captured trace | ❌ you capture by hand | ❌ | ❌ you interpret it yourself |
+| **eBPF tools** (bcc, bpftrace) | kernel scheduling / off-CPU waits | ⚠️ if you script it | ✅ | ❌ blind to on-CPU stalls (e.g. GC) |
+| **APM / dashboards** (Datadog, Grafana) | fleet-wide trends & request traces | ✅ sampled | ⚠️ partial | ⚠️ coarse, not down to a goroutine |
+| **gander** | one slow service, on one machine | ✅ **heartbeat trigger** | ✅ **no eBPF needed** | ✅ **deterministic findings** |
+
+gander's niche is narrow on purpose: a **single process, on a single machine**,
+that catches a stall *as it happens* and explains it. It is **not** a fleet-wide
+observability platform — it's what you reach for when one service is mysteriously
+slow and the dashboards insist CPU looks fine.
+
+## Install
 
 ```bash
-go install github.com/vucong2409/gander@latest    # or: go build -o gander .
+go install github.com/vucong2409/gander@latest
+# or, from a clone:
+go build -o gander .
+```
 
-# 1. produce a bundle from a synthetic stall (writes bundles/<timestamp>/)
+## Quick start
+
+Three steps: make a stall, look at it, diagnose it.
+
+```bash
+# 1. Run the built-in demo. It does fake work and stalls on purpose, writing a
+#    snapshot ("bundle") to bundles/<timestamp>/ each time a stall is caught.
 gander demo --stall-chan --budget=10ms
 
-# 2. render the fused timeline, then open the .json at https://ui.perfetto.dev
-gander emit bundles/<timestamp>
+# 2. Turn a snapshot into a visual timeline.
+gander emit bundles/<timestamp>     # writes fused.json
+#    → open that fused.json file at https://ui.perfetto.dev
 
-# 3. diagnose
+# 3. Ask gander what went wrong.
 gander diag bundles/<timestamp>
 ```
 
-`gander diag` prints, for example:
+`gander diag` prints findings in plain English, for example:
 
 ```
 [warn] a work-unit exceeded its latency budget
-       work-unit ran 11ms (budget 10ms) — 1.1× over
+       work-unit ran 11ms (budget 10ms) — 1.1x over
 [warn] the slowest work-unit and what blocked it
-       the slowest work-unit ran on G1 main.main for 41ms; it spent 40ms blocked on "chan receive"
-[info] wait time by block reason (summed across goroutines, excluding idle runtime)
+       the slowest work-unit ran on G1 main.main for 41ms;
+       it spent 40ms blocked on "chan receive"
+[info] wait time by block reason
        select 4282ms; chan receive 3430ms; sleep 492ms
 ```
 
-## Embed in your service
+The Perfetto timeline from step 2 shows the same story visually: one lane per
+goroutine (labelled by function), GC pauses, arrows showing who woke whom, and
+the kernel's CPU-throttling/pressure numbers as tracks right beside them.
 
-Add gander to a real service in a few lines — the watchdog auto-captures a bundle
+## How it works
+
+Two simple parts, all pure Go plus a few `/proc` and cgroup files — no eBPF, no
+`perf`, no special privileges:
+
+1. **Watch and capture.** A lightweight heartbeat times each unit of work. The
+   moment one runs over its budget, gander saves a *bundle*: the recent execution
+   trace (the lead-up to the stall), the kernel's CPU-throttling and pressure
+   numbers, and a dump of every goroutine — all stamped onto one shared clock.
+2. **Diagnose.** `gander diag` runs a fixed set of rules over that bundle and
+   prints scored findings: how far over budget you went, which goroutine was
+   slowest and what it was blocked on, whether the kernel throttled your CPU, and
+   where the wait time went. The rules are fully deterministic — same bundle in,
+   same findings out — so there's no guessing and nothing to second-guess.
+
+## Embed in your own program (experimental)
+
+You can wire gander into a Go program directly, so it auto-captures a bundle
 whenever a work-unit overruns its budget:
 
 ```go
@@ -70,21 +109,26 @@ r, _ := record.Start(record.Options{
 defer r.Stop()
 
 for msg := range queue {
-    end := r.Begin(ctx) // marks a work-unit (+ a trace region for goid-aware diagnosis)
+    end := r.Begin(ctx) // marks the start of a work-unit
     process(msg)
-    end()
+    end()               // marks the end
 }
 ```
 
 Then inspect the bundles it writes with `gander emit` / `gander diag`.
 
+> **Heads up:** the `record` API is unit-tested but has **not** been run inside a
+> real production service yet, and both it and the findings format may still
+> change. Treat it as experimental.
+
 ## Status
 
-Working proof-of-concept. The collect → fuse → diagnose loop runs end-to-end on
-the demo and embeds in a real service via `record`. cgroup throttling and PSI are
-Linux-only (a no-op on other platforms; the trace and diagnosis still work). The
-`record` API and the finding schema are not yet stable.
+Working proof-of-concept. The capture → timeline → diagnose loop runs end-to-end
+on the built-in demo (see [`docs/linux-validation.md`](docs/linux-validation.md)).
+CPU throttling and pressure are Linux-only (skipped elsewhere; the trace and
+diagnosis still work). The `record` API and the findings format are not yet
+stable.
 
 ## License
 
-TBD (Apache-2.0 or MIT).
+[Apache License 2.0](LICENSE). © 2026 the gander authors.
