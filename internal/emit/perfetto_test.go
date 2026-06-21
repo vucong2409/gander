@@ -123,6 +123,66 @@ func TestWriteChromeTraceASCIIOnly(t *testing.T) {
 	}
 }
 
+func TestWriteChromeTraceUXMarkers(t *testing.T) {
+	pt := &synth.ParsedTrace{Events: []synth.Event{
+		// busy goroutine 1 (lots of Running) vs parked goroutine 2 (only Waiting)
+		{TS: 0, Dur: 0, Kind: synth.KindGoState, Goroutine: 1, Name: "Running"},
+		{TS: 900, Kind: synth.KindGoState, Goroutine: 1, Name: "Waiting", Detail: "chan receive"},
+		{TS: 1000, Kind: synth.KindGoState, Goroutine: 1, Name: "Running"},
+		{TS: 0, Kind: synth.KindGoState, Goroutine: 2, Name: "Waiting", Detail: "system goroutine wait"},
+		// a real GC STW (overlaid) and a tracing-induced one (not overlaid)
+		{TS: 200, Dur: 30, Kind: synth.KindRange, Name: "stop-the-world (GC sweep termination)"},
+		{TS: 400, Dur: 30, Kind: synth.KindRange, Name: "stop-the-world (start trace)"},
+		// two work-units; the longer one is the stall
+		{TS: 100, Dur: 50, Kind: synth.KindRegion, Goroutine: 1, Name: "work-unit"},
+		{TS: 300, Dur: 600, Kind: synth.KindRegion, Goroutine: 1, Name: "work-unit"},
+	}}
+
+	var buf bytes.Buffer
+	if err := emit.WriteChromeTrace(&buf, pt); err != nil {
+		t.Fatalf("WriteChromeTrace: %v", err)
+	}
+	var events []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &events); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	var stwGlobal, stwTracing, stallMarker bool
+	sortIdx := map[float64]float64{} // tid -> sort_index
+	for _, e := range events {
+		name, _ := e["name"].(string)
+		if e["ph"] == "i" && e["s"] == "g" {
+			switch {
+			case strings.Contains(name, "GC sweep termination"):
+				stwGlobal = true
+			case strings.Contains(name, "start trace"):
+				stwTracing = true
+			case strings.HasPrefix(name, "slowest work-unit"):
+				stallMarker = true
+			}
+		}
+		if name == "thread_sort_index" {
+			if args, ok := e["args"].(map[string]any); ok {
+				sortIdx[e["tid"].(float64)] = args["sort_index"].(float64)
+			}
+		}
+	}
+
+	if !stwGlobal {
+		t.Error("expected a global STW overlay for the GC stop-the-world")
+	}
+	if stwTracing {
+		t.Error("tracing-induced STW should NOT be overlaid")
+	}
+	if !stallMarker {
+		t.Error("expected a global 'slowest work-unit' stall marker")
+	}
+	// busy G1 must sort above parked G2 (lower index = higher in the UI).
+	if !(sortIdx[1] < sortIdx[2]) {
+		t.Errorf("expected busy G1 ordered above parked G2, got idx G1=%v G2=%v", sortIdx[1], sortIdx[2])
+	}
+}
+
 func TestWriteChromeTraceEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	if err := emit.WriteChromeTrace(&buf, &synth.ParsedTrace{}); err != nil {

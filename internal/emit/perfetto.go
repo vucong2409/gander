@@ -12,6 +12,7 @@ package emit
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"sort"
 	"strconv"
@@ -41,6 +42,7 @@ type chromeEvent struct {
 	TID  int64          `json:"tid"`
 	ID   int            `json:"id,omitempty"` // flow id (ph:"s"/"f")
 	BP   string         `json:"bp,omitempty"` // flow binding point ("e" = enclosing slice)
+	S    string         `json:"s,omitempty"`  // instant scope: "g" = global vertical line (ph:"i")
 	Args map[string]any `json:"args,omitempty"`
 }
 
@@ -71,6 +73,8 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 	at := func(ns int64) float64 { return float64(ns-base) / 1000.0 }
 	durUS := func(ns int64) float64 { return float64(ns) / 1000.0 }
 	lanes := newLaneSet()
+	activity := map[int64]int64{} // per-goroutine on-CPU ns, for lane ordering
+	var slowestWU *synth.Event    // the longest "work-unit" region — the stall
 
 	// 1) Goroutine state transitions -> filled per-goroutine state lanes. The
 	// state a goroutine entered at transition i fills the gap until transition
@@ -91,11 +95,17 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 		idxs := byG[g]
 		sort.Slice(idxs, func(a, b int) bool { return pt.Events[idxs[a]].TS < pt.Events[idxs[b]].TS })
 		lanes.mark(pidGoroutines, g, goName(g, pt.GoNames))
+		if _, ok := activity[g]; !ok {
+			activity[g] = 0 // rank parked goroutines too (they sink to the bottom)
+		}
 		for j, idx := range idxs {
 			e := &pt.Events[idx]
 			end := maxEnd
 			if j+1 < len(idxs) {
 				end = pt.Events[idxs[j+1]].TS
+			}
+			if strings.HasPrefix(e.Name, "Running") || strings.HasPrefix(e.Name, "Syscall") {
+				activity[g] += end - e.TS // on-CPU time, for lane ordering
 			}
 			label := e.Name
 			if e.Detail != "" { // the block reason, e.g. "chan receive"
@@ -135,12 +145,23 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 				Name: e.Name, Cat: "gc", Ph: "X",
 				TS: at(e.TS), Dur: durUS(e.Dur), PID: pidRuntime, TID: tid,
 			})
+			// Overlay real GC stop-the-world pauses as a global vertical line
+			// across every lane (skip tracing-induced STWs like "start trace").
+			if isGCStopTheWorld(e.Name) {
+				events = append(events, chromeEvent{
+					Name: "STW: " + stwShort(e.Name), Cat: "stw", Ph: "i", S: "g",
+					TS: at(e.TS), PID: pidRuntime, TID: tid,
+				})
+			}
 		case synth.KindRegion:
 			lanes.mark(pidRegions, e.Goroutine, goName(e.Goroutine, pt.GoNames))
 			events = append(events, chromeEvent{
 				Name: e.Name, Cat: "region", Ph: "X",
 				TS: at(e.TS), Dur: durUS(e.Dur), PID: pidRegions, TID: e.Goroutine,
 			})
+			if e.Name == "work-unit" && (slowestWU == nil || e.Dur > slowestWU.Dur) {
+				slowestWU = e
+			}
 		case synth.KindMetric:
 			// Counter track: one series per metric name under the metrics group.
 			// Heap/GC come from the trace; cgroup/PSI from the proc sampler.
@@ -164,8 +185,59 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 		)
 	}
 
+	// Stall marker: a global vertical line at the slowest work-unit so you know
+	// where to zoom.
+	if slowestWU != nil {
+		events = append(events, chromeEvent{
+			Name: fmt.Sprintf("slowest work-unit (%.1fms)", float64(slowestWU.Dur)/1e6),
+			Cat:  "stall", Ph: "i", S: "g",
+			TS: at(slowestWU.TS), PID: pidGoroutines, TID: slowestWU.Goroutine,
+		})
+	}
+
 	events = append(events, lanes.metadata()...)
+	events = append(events, sortIndexEvents(activity)...) // busiest goroutines on top
 	return encode(w, events)
+}
+
+// isGCStopTheWorld reports whether a runtime range is a real GC stop-the-world
+// pause (worth overlaying), as opposed to a tracing-induced one such as
+// "stop-the-world (start trace)" / "(all goroutines stack trace)".
+func isGCStopTheWorld(name string) bool {
+	return strings.Contains(name, "stop-the-world") && strings.Contains(name, "GC")
+}
+
+// stwShort extracts the parenthetical reason from a stop-the-world range name:
+// "stop-the-world (GC sweep termination)" -> "GC sweep termination".
+func stwShort(name string) string {
+	if i := strings.IndexByte(name, '('); i >= 0 {
+		return strings.TrimSuffix(name[i+1:], ")")
+	}
+	return name
+}
+
+// sortIndexEvents emits thread_sort_index metadata so goroutine lanes are
+// ordered by on-CPU activity — the work goroutine and watchdog rise to the top
+// and parked runtime goroutines sink to the bottom.
+func sortIndexEvents(activity map[int64]int64) []chromeEvent {
+	gids := make([]int64, 0, len(activity))
+	for g := range activity {
+		gids = append(gids, g)
+	}
+	sort.Slice(gids, func(i, j int) bool {
+		if activity[gids[i]] != activity[gids[j]] {
+			return activity[gids[i]] > activity[gids[j]]
+		}
+		return gids[i] < gids[j]
+	})
+	evs := make([]chromeEvent, 0, len(gids))
+	for idx, g := range gids {
+		evs = append(evs, chromeEvent{
+			Name: "thread_sort_index", Ph: "M", PID: pidGoroutines, TID: g,
+			Args: map[string]any{"sort_index": idx},
+		})
+	}
+	return evs
 }
 
 func goName(g int64, names map[int64]string) string {
