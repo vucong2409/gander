@@ -6,21 +6,16 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"runtime/trace"
 	"syscall"
 	"time"
 
-	"github.com/vucong2409/gander/hb"
-	"github.com/vucong2409/gander/internal/bundle"
-	"github.com/vucong2409/gander/internal/capture"
-	"github.com/vucong2409/gander/internal/collect"
+	"github.com/vucong2409/gander/record"
 )
 
-// runDemo exercises the hb heartbeat library: a tight work loop that calls
-// hb.Tick() each iteration and, on demand, deliberately stalls so you can watch
-// the watchdog fire and a capture bundle land. Stall injection is deterministic
-// (gated on the iteration counter, not random) so the demo behaves the same on
-// every run.
+// runDemo exercises the embeddable record API: a tight work loop that marks each
+// unit with record.Begin and, on demand, deliberately stalls so you can watch
+// the watchdog auto-capture a bundle. Stall injection is deterministic (gated on
+// the iteration counter, not random) so the demo behaves the same on every run.
 //
 //	gander demo --stall-sleep=50ms --budget=10ms
 //	gander demo --stall-chan --budget=10ms   # wake-up arrows in the fused view
@@ -35,7 +30,6 @@ func runDemo(args []string) error {
 		stallAlloc = fs.Int("stall-alloc", 0, "if >0, allocate this many bytes on stall iterations to add GC pressure")
 		stallChan  = fs.Bool("stall-chan", false, "on stall iterations, block on a channel a helper goroutine feeds — produces a wake-up arrow")
 		chanDelay  = fs.Duration("stall-chan-delay", 40*time.Millisecond, "helper reply delay for --stall-chan")
-		coarse     = fs.Bool("coarse", false, "use hb coarse-clock mode on the hot path")
 		bundleDir  = fs.String("bundle-dir", "bundles", "directory to write capture bundles into")
 		capCool    = fs.Duration("capture-cooldown", time.Second, "minimum interval between capture bundles")
 	)
@@ -48,59 +42,19 @@ func runDemo(args []string) error {
 
 	logger := log.New(os.Stderr, "demo: ", log.Ltime|log.Lmicroseconds)
 
-	// On a stall, assemble a bundle (meta.json + goroutine dump + execution trace).
-	coord := capture.NewCoordinator(*bundleDir,
-		capture.WithLogger(logger),
-		capture.WithCooldown(*capCool),
-	)
-	coord.Register(collect.Goroutines{})
-
-	// Arm the flight recorder up front so its in-memory window is already filling
-	// before any stall fires; on a stall its Snapshot persists the lead-up to
-	// trace.bin. A bundle without a trace is still useful, so failure is non-fatal.
-	tracer, err := collect.NewTrace()
+	// The whole gander wiring — flight recorder, cgroup/PSI sampler, goroutine
+	// dump, and the heartbeat watchdog that auto-captures a bundle on a budget
+	// miss — is exactly the few lines a real service would add.
+	rec, err := record.Start(record.Options{
+		Budget:    *budget,
+		BundleDir: *bundleDir,
+		Cooldown:  *capCool,
+		Logger:    logger,
+	})
 	if err != nil {
-		logger.Printf("flight recorder unavailable, continuing without trace.bin: %v", err)
-	} else {
-		coord.Register(tracer)
-		defer tracer.Close()
+		return err
 	}
-
-	// Sample cgroup CPU throttling + PSI into a rolling window (Linux; a no-op
-	// on other platforms) so the fused view can show kernel stalls beside the
-	// goroutine lanes.
-	procSampler := collect.NewProc()
-	coord.Register(procSampler)
-	defer procSampler.Close()
-
-	var stalls int
-	opts := []hb.Option{
-		hb.WithBudget(*budget),
-		hb.WithCooldown(*budget), // short cooldown so repeated stalls surface in the demo
-		hb.WithOnStall(func(s hb.StallInfo) {
-			stalls++
-			logger.Printf("STALL seq=%d elapsed=%s budget=%s",
-				s.Seq, s.Elapsed.Round(time.Microsecond), s.Budget)
-			if _, err := coord.Capture(bundle.Trigger{
-				Reason: "work-unit exceeded budget",
-				Source: "heartbeat",
-				Detail: map[string]any{
-					"seq":        s.Seq,
-					"elapsed_ms": s.Elapsed.Milliseconds(),
-					"budget_ms":  s.Budget.Milliseconds(),
-				},
-			}); err != nil {
-				logger.Printf("capture error: %v", err)
-			}
-		}),
-	}
-	if *coarse {
-		opts = append(opts, hb.WithCoarseClock(true))
-	}
-
-	m := hb.New(opts...)
-	m.Start()
-	defer m.Stop()
+	defer rec.Stop()
 
 	ctx, cancel := runContext(*duration)
 	defer cancel()
@@ -126,8 +80,7 @@ func runDemo(args []string) error {
 	var iter uint64
 	for ctx.Err() == nil {
 		iter++
-		m.Tick()                                   // mark the start of this work-unit
-		reg := trace.StartRegion(ctx, "work-unit") // names this work-unit's goroutine + span in the trace
+		end := rec.Begin(ctx) // marks this work-unit for the watchdog + trace
 
 		busySpin(*work) // simulated work
 
@@ -145,11 +98,11 @@ func runDemo(args []string) error {
 				gcSink = make([]byte, *stallAlloc) // churns garbage to pressure the GC
 			}
 		}
-		reg.End()
+		end()
 	}
 
-	logger.Printf("done: %d iterations, %d stalls detected (last alloc %d bytes)",
-		iter, stalls, len(gcSink))
+	logger.Printf("done: %d iterations, last alloc %d bytes (bundles in %s; inspect with `gander emit`/`gander diag`)",
+		iter, len(gcSink), *bundleDir)
 	return nil
 }
 
