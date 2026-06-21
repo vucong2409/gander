@@ -1,7 +1,7 @@
 // Package emit turns a synthesized event stream into a viewer-loadable trace.
 //
 // The minimal first cut emits the Chrome/Catapult JSON trace format, which the
-// Perfetto UI (https://ui.perfetto.org) loads directly — no protobuf needed.
+// Perfetto UI (https://ui.perfetto.dev) loads directly — no protobuf needed.
 // Goroutine state transitions become filled per-goroutine state lanes, GC/STW
 // ranges land on a runtime lane, and user regions get their own lane.
 //
@@ -31,11 +31,6 @@ const (
 	tidRuntime    = 0
 )
 
-type chromeTrace struct {
-	TraceEvents     []chromeEvent `json:"traceEvents"`
-	DisplayTimeUnit string        `json:"displayTimeUnit"`
-}
-
 type chromeEvent struct {
 	Name string         `json:"name"`
 	Cat  string         `json:"cat,omitempty"`
@@ -49,12 +44,17 @@ type chromeEvent struct {
 	Args map[string]any `json:"args,omitempty"`
 }
 
-// WriteChromeTrace emits pt as a Chrome JSON trace to w. Timestamps are
+// WriteChromeTrace emits pt as a Chrome/Catapult JSON trace to w. Timestamps are
 // normalized so the timeline starts at zero.
+//
+// It uses the JSON *Array* Format (a bare [ ... ] of events). Perfetto's JSON
+// tokenizer imports this most reliably; the object form
+// ({"traceEvents": [...]}) can trip it (json_parser_failure). The slice is
+// non-nil so an empty stream still encodes as [], never null.
 func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
-	ct := chromeTrace{DisplayTimeUnit: "ns"}
+	events := make([]chromeEvent, 0, len(pt.Events))
 	if len(pt.Events) == 0 {
-		return encode(w, ct)
+		return encode(w, events)
 	}
 
 	base := pt.Events[0].TS
@@ -116,7 +116,7 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 			if len(args) > 0 {
 				ev.Args = args
 			}
-			ct.TraceEvents = append(ct.TraceEvents, ev)
+			events = append(events, ev)
 		}
 	}
 
@@ -131,13 +131,13 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 				tid, name = e.Goroutine, goName(e.Goroutine, pt.GoNames)
 			}
 			lanes.mark(pidRuntime, tid, name)
-			ct.TraceEvents = append(ct.TraceEvents, chromeEvent{
+			events = append(events, chromeEvent{
 				Name: e.Name, Cat: "gc", Ph: "X",
 				TS: at(e.TS), Dur: durUS(e.Dur), PID: pidRuntime, TID: tid,
 			})
 		case synth.KindRegion:
 			lanes.mark(pidRegions, e.Goroutine, goName(e.Goroutine, pt.GoNames))
-			ct.TraceEvents = append(ct.TraceEvents, chromeEvent{
+			events = append(events, chromeEvent{
 				Name: e.Name, Cat: "region", Ph: "X",
 				TS: at(e.TS), Dur: durUS(e.Dur), PID: pidRegions, TID: e.Goroutine,
 			})
@@ -145,7 +145,7 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 			// Counter track: one series per metric name under the metrics group.
 			// Heap/GC come from the trace; cgroup/PSI from the proc sampler.
 			lanes.mark(pidMetrics, tidRuntime, "runtime / kernel metrics")
-			ct.TraceEvents = append(ct.TraceEvents, chromeEvent{
+			events = append(events, chromeEvent{
 				Name: e.Name, Cat: "metric", Ph: "C",
 				TS: at(e.TS), PID: pidMetrics, TID: tidRuntime,
 				Args: map[string]any{"value": e.Value},
@@ -158,14 +158,14 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 	for i := range pt.Unblocks {
 		u := &pt.Unblocks[i]
 		ts := at(u.TS)
-		ct.TraceEvents = append(ct.TraceEvents,
+		events = append(events,
 			chromeEvent{Name: "wakeup", Cat: "wakeup", Ph: "s", ID: i + 1, TS: ts, PID: pidGoroutines, TID: u.Waker},
 			chromeEvent{Name: "wakeup", Cat: "wakeup", Ph: "f", BP: "e", ID: i + 1, TS: ts, PID: pidGoroutines, TID: u.Woken},
 		)
 	}
 
-	ct.TraceEvents = append(ct.TraceEvents, lanes.metadata()...)
-	return encode(w, ct)
+	events = append(events, lanes.metadata()...)
+	return encode(w, events)
 }
 
 func goName(g int64, names map[int64]string) string {
@@ -210,10 +210,10 @@ func stackString(frames []synth.Frame) string {
 	return b.String()
 }
 
-func encode(w io.Writer, ct chromeTrace) error {
+func encode(w io.Writer, events []chromeEvent) error {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
-	return enc.Encode(ct)
+	return enc.Encode(events)
 }
 
 // laneSet records which (pid,tid) lanes are used so it can emit the metadata
