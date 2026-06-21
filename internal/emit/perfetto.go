@@ -97,13 +97,24 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 			if j+1 < len(idxs) {
 				end = pt.Events[idxs[j+1]].TS
 			}
+			label := e.Name
+			if e.Detail != "" { // the block reason, e.g. "chan receive"
+				label = e.Name + ": " + e.Detail
+			}
 			ev := chromeEvent{
-				Name: e.Name, Cat: "sched", Ph: "X",
+				Name: label, Cat: "sched", Ph: "X",
 				TS: at(e.TS), Dur: durUS(end - e.TS),
 				PID: pidGoroutines, TID: g,
 			}
+			args := map[string]any{}
 			if e.Detail != "" {
-				ev.Args = map[string]any{"from": e.Detail}
+				args["reason"] = e.Detail
+			}
+			if s := stackString(e.Stack); s != "" {
+				args["stack"] = s
+			}
+			if len(args) > 0 {
+				ev.Args = args
 			}
 			ct.TraceEvents = append(ct.TraceEvents, ev)
 		}
@@ -172,6 +183,31 @@ func shortFunc(fn string) string {
 		return fn[i+1:]
 	}
 	return fn
+}
+
+// stackString renders up to 12 frames of a stack (leaf first) for a slice's
+// details panel — enough to see where a goroutine blocked.
+func stackString(frames []synth.Frame) string {
+	const maxFrames = 12
+	var b strings.Builder
+	for i, f := range frames {
+		if i >= maxFrames {
+			b.WriteString("\n…")
+			break
+		}
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(f.Func)
+		if f.File != "" {
+			b.WriteString(" (")
+			b.WriteString(f.File)
+			b.WriteByte(':')
+			b.WriteString(strconv.FormatUint(f.Line, 10))
+			b.WriteByte(')')
+		}
+	}
+	return b.String()
 }
 
 func encode(w io.Writer, ct chromeTrace) error {

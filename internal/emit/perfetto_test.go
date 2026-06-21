@@ -14,8 +14,8 @@ func TestWriteChromeTrace(t *testing.T) {
 	pt := &synth.ParsedTrace{
 		Events: []synth.Event{
 			{TS: 1000, Kind: synth.KindGoState, Goroutine: 1, Name: "Running"},
-			{TS: 1500, Kind: synth.KindGoState, Goroutine: 1, Name: "Waiting", Detail: "Running"},
-			{TS: 1800, Kind: synth.KindGoState, Goroutine: 1, Name: "Running", Detail: "Waiting"},
+			{TS: 1500, Kind: synth.KindGoState, Goroutine: 1, Name: "Waiting", Detail: "chan receive", Stack: []synth.Frame{{Func: "main.worker", File: "w.go", Line: 10}}},
+			{TS: 1800, Kind: synth.KindGoState, Goroutine: 1, Name: "Running"},
 			{TS: 1200, Dur: 300, Kind: synth.KindRange, Name: "GC mark"},
 			{TS: 1100, Dur: 100, Kind: synth.KindRegion, Goroutine: 1, Name: "work-unit"},
 			{TS: 1250, Kind: synth.KindMetric, Name: "/gc/heap/goal:bytes", Value: 4096},
@@ -52,7 +52,7 @@ func TestWriteChromeTrace(t *testing.T) {
 			phs[p]++
 		}
 	}
-	for _, want := range []string{"Running", "Waiting", "GC mark", "work-unit", "/gc/heap/goal:bytes"} {
+	for _, want := range []string{"Running", "Waiting: chan receive", "GC mark", "work-unit", "/gc/heap/goal:bytes"} {
 		if names[want] == 0 {
 			t.Errorf("missing event named %q", want)
 		}
@@ -82,6 +82,18 @@ func TestWriteChromeTrace(t *testing.T) {
 	}
 	if !laneNamed {
 		t.Error("expected a goroutine lane labeled with its entry function")
+	}
+
+	var reasoned bool
+	for _, e := range got.TraceEvents {
+		if args, ok := e["args"].(map[string]any); ok {
+			if args["reason"] == "chan receive" {
+				reasoned = true
+			}
+		}
+	}
+	if !reasoned {
+		t.Error("expected a Waiting slice annotated with its block reason")
 	}
 }
 
