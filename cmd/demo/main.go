@@ -41,12 +41,23 @@ func main() {
 
 	logger := log.New(os.Stderr, "demo: ", log.Ltime|log.Lmicroseconds)
 
-	// On a stall, assemble a bundle (meta.json + goroutine dump for now).
+	// On a stall, assemble a bundle (meta.json + goroutine dump + execution trace).
 	coord := capture.NewCoordinator(*bundleDir,
 		capture.WithLogger(logger),
 		capture.WithCooldown(*capCool),
 	)
 	coord.Register(collect.Goroutines{})
+
+	// Arm the flight recorder up front so its in-memory window is already filling
+	// before any stall fires; on a stall its Snapshot persists the lead-up to
+	// trace.bin. A bundle without a trace is still useful, so failure is non-fatal.
+	tracer, err := collect.NewTrace()
+	if err != nil {
+		logger.Printf("flight recorder unavailable, continuing without trace.bin: %v", err)
+	} else {
+		coord.Register(tracer)
+		defer tracer.Close()
+	}
 
 	var stalls int
 	opts := []hb.Option{

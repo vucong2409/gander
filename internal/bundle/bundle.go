@@ -7,7 +7,7 @@
 //	bundle/<ts>/
 //	  meta.json        trigger reason, env, clock baseline (this package)
 //	  goroutines.txt   pprof goroutine dump          (internal/collect)
-//	  trace.bin        execution trace               (PR4)
+//	  trace.bin        execution trace               (PR3)
 //	  metrics.json     runtime/metrics samples       (PR5)
 //	  proc.json        schedstat / cgroup / PSI       (PR6)
 //	  fused.perfetto   fused timeline                 (PR9)
