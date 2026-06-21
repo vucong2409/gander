@@ -33,3 +33,21 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+
+# AI stuff
+.claude
+CLAUDE.md
+
+# Node
+node_modules
+
+# Beads / Dolt files (added by bd init) — keep the whole tracker out of git
+.beads/
+AGENTS.md
+.dolt/
+*.db
+.beads-credential-key
+
+package-lock.json
+package.json
