@@ -17,6 +17,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime/trace"
 	"syscall"
 	"time"
 
@@ -122,7 +123,8 @@ func main() {
 	var iter uint64
 	for ctx.Err() == nil {
 		iter++
-		m.Tick() // mark the start of this work-unit
+		m.Tick()                                   // mark the start of this work-unit
+		reg := trace.StartRegion(ctx, "work-unit") // names this work-unit's goroutine + span in the trace
 
 		busySpin(*work) // simulated work
 
@@ -140,6 +142,7 @@ func main() {
 				gcSink = make([]byte, *stallAlloc) // churns garbage to pressure the GC
 			}
 		}
+		reg.End()
 	}
 
 	logger.Printf("done: %d iterations, %d stalls detected (last alloc %d bytes)",
