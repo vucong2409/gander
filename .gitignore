@@ -20,6 +20,9 @@ profile.cov
 # Build / release output (GoReleaser, CI binaries)
 /dist/
 
+# gander capture bundles (runtime output)
+/bundles/
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
