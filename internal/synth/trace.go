@@ -114,7 +114,7 @@ func ParseTrace(r io.Reader) (*ParsedTrace, error) {
 				Proc:      int64(ev.Proc()),
 				Thread:    int64(ev.Thread()),
 				Name:      to.String(),
-				Detail:    from.String(),
+				Detail:    st.Reason, // block reason, e.g. "chan receive", "sync.Mutex.Lock", "sleep"
 				Stack:     stk,
 			})
 
