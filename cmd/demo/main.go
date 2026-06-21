@@ -5,6 +5,7 @@
 // Example (prints STALL lines to stderr):
 //
 //	go run ./cmd/demo --stall-sleep=50ms --budget=10ms
+//	go run ./cmd/demo --stall-chan --budget=10ms   # wake-up arrows in the fused view
 //
 // Stall injection is deterministic (gated on the iteration counter, not random)
 // so the demo behaves the same on every run.
@@ -33,6 +34,8 @@ func main() {
 		stallSleep = flag.Duration("stall-sleep", 0, "if >0, inject a sleep of this length to force an off-CPU stall")
 		stallEvery = flag.Int("stall-every", 50, "inject the stall on every Nth iteration (<=0 disables)")
 		stallAlloc = flag.Int("stall-alloc", 0, "if >0, allocate this many bytes on stall iterations to add GC pressure")
+		stallChan  = flag.Bool("stall-chan", false, "on stall iterations, block on a channel a helper goroutine feeds — produces a wake-up arrow")
+		chanDelay  = flag.Duration("stall-chan-delay", 40*time.Millisecond, "helper reply delay for --stall-chan")
 		coarse     = flag.Bool("coarse", false, "use hb coarse-clock mode on the hot path")
 		bundleDir  = flag.String("bundle-dir", "bundles", "directory to write capture bundles into")
 		capCool    = flag.Duration("capture-cooldown", time.Second, "minimum interval between capture bundles")
@@ -58,6 +61,13 @@ func main() {
 		coord.Register(tracer)
 		defer tracer.Close()
 	}
+
+	// Sample cgroup CPU throttling + PSI into a rolling window (Linux; a no-op
+	// on other platforms) so the fused view can show kernel stalls beside the
+	// goroutine lanes.
+	procSampler := collect.NewProc()
+	coord.Register(procSampler)
+	defer procSampler.Close()
 
 	var stalls int
 	opts := []hb.Option{
@@ -91,8 +101,23 @@ func main() {
 	ctx, cancel := runContext(*duration)
 	defer cancel()
 
-	logger.Printf("running: budget=%s work=%s stall-sleep=%s stall-every=%d bundle-dir=%s",
-		*budget, *work, *stallSleep, *stallEvery, *bundleDir)
+	logger.Printf("running: budget=%s work=%s stall-sleep=%s stall-chan=%t stall-every=%d bundle-dir=%s",
+		*budget, *work, *stallSleep, *stallChan, *stallEvery, *bundleDir)
+
+	// Optional channel-based stall: a helper replies after a delay, so each stall
+	// is a real goroutine-to-goroutine wake-up (a flow arrow) rather than a timer
+	// wake-up (which has no waker and so draws no arrow).
+	var wakeReq chan chan struct{}
+	if *stallChan {
+		wakeReq = make(chan chan struct{})
+		go func() {
+			for done := range wakeReq {
+				time.Sleep(*chanDelay)
+				close(done) // wakes the requesting goroutine
+			}
+		}()
+		defer close(wakeReq)
+	}
 
 	var iter uint64
 	for ctx.Err() == nil {
@@ -103,6 +128,11 @@ func main() {
 
 		// Deterministic stall injection.
 		if *stallEvery > 0 && iter%uint64(*stallEvery) == 0 {
+			if *stallChan {
+				done := make(chan struct{})
+				wakeReq <- done
+				<-done // block until the helper wakes us — a real wake-up edge
+			}
 			if *stallSleep > 0 {
 				time.Sleep(*stallSleep)
 			}

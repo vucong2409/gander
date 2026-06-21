@@ -3,6 +3,7 @@ package emit_test
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/vucong2409/gander/internal/emit"
@@ -10,13 +11,18 @@ import (
 )
 
 func TestWriteChromeTrace(t *testing.T) {
-	pt := &synth.ParsedTrace{Events: []synth.Event{
-		{TS: 1000, Kind: synth.KindGoState, Goroutine: 1, Name: "Running"},
-		{TS: 1500, Kind: synth.KindGoState, Goroutine: 1, Name: "Waiting", Detail: "Running"},
-		{TS: 1800, Kind: synth.KindGoState, Goroutine: 1, Name: "Running", Detail: "Waiting"},
-		{TS: 1200, Dur: 300, Kind: synth.KindRange, Name: "GC mark"},
-		{TS: 1100, Dur: 100, Kind: synth.KindRegion, Goroutine: 1, Name: "work-unit"},
-	}}
+	pt := &synth.ParsedTrace{
+		Events: []synth.Event{
+			{TS: 1000, Kind: synth.KindGoState, Goroutine: 1, Name: "Running"},
+			{TS: 1500, Kind: synth.KindGoState, Goroutine: 1, Name: "Waiting", Detail: "Running"},
+			{TS: 1800, Kind: synth.KindGoState, Goroutine: 1, Name: "Running", Detail: "Waiting"},
+			{TS: 1200, Dur: 300, Kind: synth.KindRange, Name: "GC mark"},
+			{TS: 1100, Dur: 100, Kind: synth.KindRegion, Goroutine: 1, Name: "work-unit"},
+			{TS: 1250, Kind: synth.KindMetric, Name: "/gc/heap/goal:bytes", Value: 4096},
+		},
+		Unblocks: []synth.Unblock{{TS: 1800, Waker: 2, Woken: 1}},
+		GoNames:  map[int64]string{1: "github.com/x/pkg.worker"},
+	}
 
 	var buf bytes.Buffer
 	if err := emit.WriteChromeTrace(&buf, pt); err != nil {
@@ -46,7 +52,7 @@ func TestWriteChromeTrace(t *testing.T) {
 			phs[p]++
 		}
 	}
-	for _, want := range []string{"Running", "Waiting", "GC mark", "work-unit"} {
+	for _, want := range []string{"Running", "Waiting", "GC mark", "work-unit", "/gc/heap/goal:bytes"} {
 		if names[want] == 0 {
 			t.Errorf("missing event named %q", want)
 		}
@@ -56,6 +62,26 @@ func TestWriteChromeTrace(t *testing.T) {
 	}
 	if phs["M"] == 0 {
 		t.Error("expected metadata (M) events naming the lanes")
+	}
+	if phs["C"] == 0 {
+		t.Error("expected counter (C) events for metrics")
+	}
+	if phs["s"] == 0 || phs["f"] == 0 {
+		t.Errorf("expected flow start/finish (s/f) for wake-ups, got s=%d f=%d", phs["s"], phs["f"])
+	}
+
+	var laneNamed bool
+	for _, e := range got.TraceEvents {
+		if e["name"] == "thread_name" {
+			if args, ok := e["args"].(map[string]any); ok {
+				if n, _ := args["name"].(string); strings.Contains(n, "pkg.worker") {
+					laneNamed = true
+				}
+			}
+		}
+	}
+	if !laneNamed {
+		t.Error("expected a goroutine lane labeled with its entry function")
 	}
 }
 

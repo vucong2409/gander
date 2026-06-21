@@ -15,6 +15,7 @@ import (
 	"io"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/vucong2409/gander/internal/synth"
 )
@@ -26,6 +27,7 @@ const (
 	pidGoroutines = 1
 	pidRuntime    = 2
 	pidRegions    = 3
+	pidMetrics    = 4
 	tidRuntime    = 0
 )
 
@@ -42,6 +44,8 @@ type chromeEvent struct {
 	Dur  float64        `json:"dur,omitempty"` // microseconds (ph:"X")
 	PID  int            `json:"pid"`
 	TID  int64          `json:"tid"`
+	ID   int            `json:"id,omitempty"` // flow id (ph:"s"/"f")
+	BP   string         `json:"bp,omitempty"` // flow binding point ("e" = enclosing slice)
 	Args map[string]any `json:"args,omitempty"`
 }
 
@@ -86,7 +90,7 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 	for _, g := range gids {
 		idxs := byG[g]
 		sort.Slice(idxs, func(a, b int) bool { return pt.Events[idxs[a]].TS < pt.Events[idxs[b]].TS })
-		lanes.mark(pidGoroutines, g, goName(g))
+		lanes.mark(pidGoroutines, g, goName(g, pt.GoNames))
 		for j, idx := range idxs {
 			e := &pt.Events[idx]
 			end := maxEnd
@@ -113,7 +117,7 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 			tid := int64(tidRuntime)
 			name := "GC / runtime"
 			if e.Goroutine != 0 {
-				tid, name = e.Goroutine, goName(e.Goroutine)
+				tid, name = e.Goroutine, goName(e.Goroutine, pt.GoNames)
 			}
 			lanes.mark(pidRuntime, tid, name)
 			ct.TraceEvents = append(ct.TraceEvents, chromeEvent{
@@ -121,19 +125,54 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 				TS: at(e.TS), Dur: durUS(e.Dur), PID: pidRuntime, TID: tid,
 			})
 		case synth.KindRegion:
-			lanes.mark(pidRegions, e.Goroutine, goName(e.Goroutine))
+			lanes.mark(pidRegions, e.Goroutine, goName(e.Goroutine, pt.GoNames))
 			ct.TraceEvents = append(ct.TraceEvents, chromeEvent{
 				Name: e.Name, Cat: "region", Ph: "X",
 				TS: at(e.TS), Dur: durUS(e.Dur), PID: pidRegions, TID: e.Goroutine,
 			})
+		case synth.KindMetric:
+			// Counter track: one series per metric name under the metrics group.
+			// Heap/GC come from the trace; cgroup/PSI from the proc sampler.
+			lanes.mark(pidMetrics, tidRuntime, "runtime / kernel metrics")
+			ct.TraceEvents = append(ct.TraceEvents, chromeEvent{
+				Name: e.Name, Cat: "metric", Ph: "C",
+				TS: at(e.TS), PID: pidMetrics, TID: tidRuntime,
+				Args: map[string]any{"value": e.Value},
+			})
 		}
+	}
+
+	// 4) Wake-up arrows: a flow edge from the waker goroutine to the woken one,
+	// bound to whatever slice encloses each endpoint.
+	for i := range pt.Unblocks {
+		u := &pt.Unblocks[i]
+		ts := at(u.TS)
+		ct.TraceEvents = append(ct.TraceEvents,
+			chromeEvent{Name: "wakeup", Cat: "wakeup", Ph: "s", ID: i + 1, TS: ts, PID: pidGoroutines, TID: u.Waker},
+			chromeEvent{Name: "wakeup", Cat: "wakeup", Ph: "f", BP: "e", ID: i + 1, TS: ts, PID: pidGoroutines, TID: u.Woken},
+		)
 	}
 
 	ct.TraceEvents = append(ct.TraceEvents, lanes.metadata()...)
 	return encode(w, ct)
 }
 
-func goName(g int64) string { return "G" + strconv.FormatInt(g, 10) }
+func goName(g int64, names map[int64]string) string {
+	label := "G" + strconv.FormatInt(g, 10)
+	if fn := names[g]; fn != "" {
+		label += " " + shortFunc(fn)
+	}
+	return label
+}
+
+// shortFunc trims the package path from a fully-qualified function name:
+// "github.com/x/y/pkg.Func" -> "pkg.Func".
+func shortFunc(fn string) string {
+	if i := strings.LastIndexByte(fn, '/'); i >= 0 {
+		return fn[i+1:]
+	}
+	return fn
+}
 
 func encode(w io.Writer, ct chromeTrace) error {
 	enc := json.NewEncoder(w)

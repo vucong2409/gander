@@ -46,6 +46,7 @@ type Source uint8
 
 const (
 	SourceTrace Source = iota // the Go execution trace
+	SourceProc                // /proc and cgroup samplers (counter values)
 )
 
 // Frame is one symbolized stack frame.
@@ -74,5 +75,6 @@ type Event struct {
 
 	Name   string  // state / range / region / metric name, or log category
 	Detail string  // from-state, log message, metric value, etc.
+	Value  float64 // numeric value for KindMetric / counter events
 	Stack  []Frame // optional
 }
