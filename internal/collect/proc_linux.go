@@ -44,9 +44,20 @@ func cgroupDir() string {
 	}
 	for _, line := range strings.Split(string(b), "\n") {
 		// cgroup v2 has a single line of the form "0::/path".
-		if rest, ok := strings.CutPrefix(line, "0::"); ok {
-			return filepath.Join(root, rest)
+		rest, ok := strings.CutPrefix(line, "0::")
+		if !ok {
+			continue
 		}
+		dir := filepath.Join(root, rest)
+		// Inside a cgroup namespace (Docker/Kubernetes) the path reported by
+		// /proc/self/cgroup is the host-side path and usually does not exist
+		// under this mount — the container's own cgroup files live at the mount
+		// root. Fall back to root if the resolved directory has no cpu.stat,
+		// otherwise the sampler would silently collect nothing.
+		if _, err := os.Stat(filepath.Join(dir, "cpu.stat")); err != nil {
+			return root
+		}
+		return dir
 	}
 	return root
 }
