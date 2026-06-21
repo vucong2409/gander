@@ -187,12 +187,18 @@ func shortFunc(fn string) string {
 
 // stackString renders up to 12 frames of a stack (leaf first) for a slice's
 // details panel — enough to see where a goroutine blocked.
+//
+// Output is kept pure ASCII on purpose: Perfetto's JSON trace tokenizer is
+// byte-oriented and rejects multi-byte UTF-8 in string values (it surfaces as
+// json_parser_failure), so the overflow marker is "..." rather than a "…".
 func stackString(frames []synth.Frame) string {
 	const maxFrames = 12
 	var b strings.Builder
 	for i, f := range frames {
 		if i >= maxFrames {
-			b.WriteString("\n…")
+			b.WriteString("\n... (")
+			b.WriteString(strconv.Itoa(len(frames) - maxFrames))
+			b.WriteString(" more)")
 			break
 		}
 		if i > 0 {
