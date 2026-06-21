@@ -26,6 +26,7 @@ const (
 	pidGoroutines = 1
 	pidRuntime    = 2
 	pidRegions    = 3
+	pidMetrics    = 4
 	tidRuntime    = 0
 )
 
@@ -42,6 +43,8 @@ type chromeEvent struct {
 	Dur  float64        `json:"dur,omitempty"` // microseconds (ph:"X")
 	PID  int            `json:"pid"`
 	TID  int64          `json:"tid"`
+	ID   int            `json:"id,omitempty"` // flow id (ph:"s"/"f")
+	BP   string         `json:"bp,omitempty"` // flow binding point ("e" = enclosing slice)
 	Args map[string]any `json:"args,omitempty"`
 }
 
@@ -126,7 +129,27 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 				Name: e.Name, Cat: "region", Ph: "X",
 				TS: at(e.TS), Dur: durUS(e.Dur), PID: pidRegions, TID: e.Goroutine,
 			})
+		case synth.KindMetric:
+			// Counter track: one series per metric name under the metrics group.
+			// Heap/GC come from the trace; cgroup/PSI from the proc sampler.
+			lanes.mark(pidMetrics, tidRuntime, "runtime / kernel metrics")
+			ct.TraceEvents = append(ct.TraceEvents, chromeEvent{
+				Name: e.Name, Cat: "metric", Ph: "C",
+				TS: at(e.TS), PID: pidMetrics, TID: tidRuntime,
+				Args: map[string]any{"value": e.Value},
+			})
 		}
+	}
+
+	// 4) Wake-up arrows: a flow edge from the waker goroutine to the woken one,
+	// bound to whatever slice encloses each endpoint.
+	for i := range pt.Unblocks {
+		u := &pt.Unblocks[i]
+		ts := at(u.TS)
+		ct.TraceEvents = append(ct.TraceEvents,
+			chromeEvent{Name: "wakeup", Cat: "wakeup", Ph: "s", ID: i + 1, TS: ts, PID: pidGoroutines, TID: u.Waker},
+			chromeEvent{Name: "wakeup", Cat: "wakeup", Ph: "f", BP: "e", ID: i + 1, TS: ts, PID: pidGoroutines, TID: u.Woken},
+		)
 	}
 
 	ct.TraceEvents = append(ct.TraceEvents, lanes.metadata()...)

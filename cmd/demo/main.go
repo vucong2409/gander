@@ -59,6 +59,13 @@ func main() {
 		defer tracer.Close()
 	}
 
+	// Sample cgroup CPU throttling + PSI into a rolling window (Linux; a no-op
+	// on other platforms) so the fused view can show kernel stalls beside the
+	// goroutine lanes.
+	procSampler := collect.NewProc()
+	coord.Register(procSampler)
+	defer procSampler.Close()
+
 	var stalls int
 	opts := []hb.Option{
 		hb.WithBudget(*budget),

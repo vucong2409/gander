@@ -18,11 +18,20 @@ type ClockRef struct {
 	MonoNano     uint64
 }
 
+// Unblock records that one goroutine made another runnable — the wake-up edge
+// used to draw causality arrows.
+type Unblock struct {
+	TS    int64 // trace-clock ns of the wake-up
+	Waker int64 // GoID that did the unblocking
+	Woken int64 // GoID that became runnable
+}
+
 // ParsedTrace is the result of reading one execution trace.
 type ParsedTrace struct {
-	Events  []Event
-	Clock   *ClockRef // from the first Sync event; nil pre-go1.25
-	StartTS int64     // trace-clock ns of the first non-sync event
+	Events   []Event
+	Unblocks []Unblock
+	Clock    *ClockRef // from the first Sync event; nil pre-go1.25
+	StartTS  int64     // trace-clock ns of the first non-sync event
 }
 
 // CountByKind tallies events by Kind — handy for diagnosis and tests.
@@ -78,11 +87,19 @@ func ParseTrace(r io.Reader) (*ParsedTrace, error) {
 				break // proc/thread transitions are not surfaced yet
 			}
 			from, to := st.Goroutine()
+			woken := int64(st.Resource.Goroutine())
+			// A Waiting->Runnable transition is a wake-up; the event's actor
+			// goroutine is whoever did the unblocking.
+			if from == exptrace.GoWaiting && to == exptrace.GoRunnable {
+				if waker := int64(ev.Goroutine()); waker > 0 && waker != woken {
+					pt.Unblocks = append(pt.Unblocks, Unblock{TS: ts, Waker: waker, Woken: woken})
+				}
+			}
 			pt.Events = append(pt.Events, Event{
 				TS:        ts,
 				Kind:      KindGoState,
 				Source:    SourceTrace,
-				Goroutine: int64(st.Resource.Goroutine()),
+				Goroutine: woken,
 				Proc:      int64(ev.Proc()),
 				Thread:    int64(ev.Thread()),
 				Name:      to.String(),
@@ -127,10 +144,11 @@ func ParseTrace(r io.Reader) (*ParsedTrace, error) {
 
 		case exptrace.EventMetric:
 			m := ev.Metric()
-			pt.Events = append(pt.Events, Event{
-				TS: ts, Kind: KindMetric, Source: SourceTrace,
-				Name: m.Name, Detail: m.Value.String(),
-			})
+			e := Event{TS: ts, Kind: KindMetric, Source: SourceTrace, Name: m.Name, Detail: m.Value.String()}
+			if m.Value.Kind() == exptrace.ValueUint64 {
+				e.Value = float64(m.Value.Uint64())
+			}
+			pt.Events = append(pt.Events, e)
 
 		case exptrace.EventStackSample:
 			pt.Events = append(pt.Events, Event{
