@@ -1,14 +1,3 @@
-// Command emit converts a captured execution trace into a Perfetto-loadable
-// Chrome JSON trace — the "see the fused view" step.
-//
-// Point it at a capture bundle (it finds trace.bin and writes fused.json beside
-// it) or directly at a trace.bin:
-//
-//	go run ./cmd/emit bundles/20260101T000000.000-123     # -> bundles/.../fused.json
-//	go run ./cmd/emit some/trace.bin -o fused.json
-//	go run ./cmd/emit some/trace.bin                       # -> stdout
-//
-// Open the output (fused.json) at https://ui.perfetto.dev.
 package main
 
 import (
@@ -23,48 +12,63 @@ import (
 	"github.com/vucong2409/gander/internal/synth"
 )
 
-func main() {
-	out := flag.String("o", "", "output path (default: <bundle>/fused.json, or stdout for a trace.bin)")
-	flag.Parse()
-	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: emit [-o out.json] <bundle-dir | trace.bin>")
-		os.Exit(2)
+// runEmit converts a captured execution trace into a Perfetto-loadable Chrome
+// JSON trace — the "see the fused view" step. Point it at a capture bundle (it
+// finds trace.bin and writes fused.json beside it) or directly at a trace.bin:
+//
+//	gander emit bundles/20260101T000000.000-123   # -> bundles/.../fused.json
+//	gander emit some/trace.bin -o fused.json
+//	gander emit some/trace.bin                     # -> stdout
+//
+// Open the output (fused.json) at https://ui.perfetto.dev.
+func runEmit(args []string) error {
+	fs := flag.NewFlagSet("emit", flag.ContinueOnError)
+	out := fs.String("o", "", "output path (default: <bundle>/fused.json, or stdout for a trace.bin)")
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: gander emit [-o out.json] <bundle-dir | trace.bin>")
 	}
 
-	tracePath, procPath, outPath, err := resolvePaths(flag.Arg(0), *out)
+	tracePath, procPath, outPath, err := resolvePaths(fs.Arg(0), *out)
 	if err != nil {
-		fail(err)
+		return err
 	}
 
 	f, err := os.Open(tracePath)
 	if err != nil {
-		fail(err)
+		return err
 	}
 	defer func() { _ = f.Close() }()
 
 	pt, err := synth.ParseTrace(f)
 	if err != nil {
-		fail(fmt.Errorf("parse trace: %w", err))
+		return fmt.Errorf("parse trace: %w", err)
 	}
 
 	if procPath != "" {
 		if n, err := mergeProc(pt, procPath); err != nil {
-			fmt.Fprintln(os.Stderr, "emit: warning: proc.json:", err)
+			fmt.Fprintln(os.Stderr, "gander emit: warning: proc.json:", err)
 		} else if n > 0 {
-			fmt.Fprintf(os.Stderr, "emit: merged %d cgroup/PSI samples\n", n)
+			fmt.Fprintf(os.Stderr, "gander emit: merged %d cgroup/PSI samples\n", n)
 		}
 	}
 
 	if err := writeOut(outPath, pt); err != nil {
-		fail(err)
+		return err
 	}
 
 	dest := outPath
 	if dest == "" {
 		dest = "stdout"
 	}
-	fmt.Fprintf(os.Stderr, "emit: %d events from %s → %s\n", len(pt.Events), tracePath, dest)
-	fmt.Fprintf(os.Stderr, "emit: open %s at https://ui.perfetto.dev (load the .json, not trace.bin)\n", dest)
+	fmt.Fprintf(os.Stderr, "gander emit: %d events from %s → %s\n", len(pt.Events), tracePath, dest)
+	fmt.Fprintf(os.Stderr, "gander emit: open %s at https://ui.perfetto.dev (load the .json, not trace.bin)\n", dest)
+	return nil
 }
 
 // resolvePaths derives the input trace.bin and output path. A directory is
@@ -126,9 +130,4 @@ func writeOut(outPath string, pt *synth.ParsedTrace) error {
 		return werr
 	}
 	return cerr
-}
-
-func fail(err error) {
-	fmt.Fprintln(os.Stderr, "emit:", err)
-	os.Exit(1)
 }

@@ -1,14 +1,3 @@
-// Command demo exercises the hb heartbeat library: it runs a tight work loop
-// that calls hb.Tick() each iteration and, on demand, deliberately stalls so you
-// can watch the watchdog fire — before any of gander's capture machinery exists.
-//
-// Example (prints STALL lines to stderr):
-//
-//	go run ./cmd/demo --stall-sleep=50ms --budget=10ms
-//	go run ./cmd/demo --stall-chan --budget=10ms   # wake-up arrows in the fused view
-//
-// Stall injection is deterministic (gated on the iteration counter, not random)
-// so the demo behaves the same on every run.
 package main
 
 import (
@@ -27,21 +16,35 @@ import (
 	"github.com/vucong2409/gander/internal/collect"
 )
 
-func main() {
+// runDemo exercises the hb heartbeat library: a tight work loop that calls
+// hb.Tick() each iteration and, on demand, deliberately stalls so you can watch
+// the watchdog fire and a capture bundle land. Stall injection is deterministic
+// (gated on the iteration counter, not random) so the demo behaves the same on
+// every run.
+//
+//	gander demo --stall-sleep=50ms --budget=10ms
+//	gander demo --stall-chan --budget=10ms   # wake-up arrows in the fused view
+func runDemo(args []string) error {
+	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
 	var (
-		budget     = flag.Duration("budget", 10*time.Millisecond, "work-unit budget; the watchdog fires when an iteration exceeds it")
-		work       = flag.Duration("work", time.Millisecond, "simulated on-CPU work per iteration")
-		duration   = flag.Duration("duration", 3*time.Second, "how long to run (0 = until interrupted)")
-		stallSleep = flag.Duration("stall-sleep", 0, "if >0, inject a sleep of this length to force an off-CPU stall")
-		stallEvery = flag.Int("stall-every", 50, "inject the stall on every Nth iteration (<=0 disables)")
-		stallAlloc = flag.Int("stall-alloc", 0, "if >0, allocate this many bytes on stall iterations to add GC pressure")
-		stallChan  = flag.Bool("stall-chan", false, "on stall iterations, block on a channel a helper goroutine feeds — produces a wake-up arrow")
-		chanDelay  = flag.Duration("stall-chan-delay", 40*time.Millisecond, "helper reply delay for --stall-chan")
-		coarse     = flag.Bool("coarse", false, "use hb coarse-clock mode on the hot path")
-		bundleDir  = flag.String("bundle-dir", "bundles", "directory to write capture bundles into")
-		capCool    = flag.Duration("capture-cooldown", time.Second, "minimum interval between capture bundles")
+		budget     = fs.Duration("budget", 10*time.Millisecond, "work-unit budget; the watchdog fires when an iteration exceeds it")
+		work       = fs.Duration("work", time.Millisecond, "simulated on-CPU work per iteration")
+		duration   = fs.Duration("duration", 3*time.Second, "how long to run (0 = until interrupted)")
+		stallSleep = fs.Duration("stall-sleep", 0, "if >0, inject a sleep of this length to force an off-CPU stall")
+		stallEvery = fs.Int("stall-every", 50, "inject the stall on every Nth iteration (<=0 disables)")
+		stallAlloc = fs.Int("stall-alloc", 0, "if >0, allocate this many bytes on stall iterations to add GC pressure")
+		stallChan  = fs.Bool("stall-chan", false, "on stall iterations, block on a channel a helper goroutine feeds — produces a wake-up arrow")
+		chanDelay  = fs.Duration("stall-chan-delay", 40*time.Millisecond, "helper reply delay for --stall-chan")
+		coarse     = fs.Bool("coarse", false, "use hb coarse-clock mode on the hot path")
+		bundleDir  = fs.String("bundle-dir", "bundles", "directory to write capture bundles into")
+		capCool    = fs.Duration("capture-cooldown", time.Second, "minimum interval between capture bundles")
 	)
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
+	}
 
 	logger := log.New(os.Stderr, "demo: ", log.Ltime|log.Lmicroseconds)
 
@@ -147,6 +150,7 @@ func main() {
 
 	logger.Printf("done: %d iterations, %d stalls detected (last alloc %d bytes)",
 		iter, stalls, len(gcSink))
+	return nil
 }
 
 // gcSink retains the most recent allocation so the optimizer cannot elide the
