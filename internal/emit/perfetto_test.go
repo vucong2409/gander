@@ -95,6 +95,34 @@ func TestWriteChromeTrace(t *testing.T) {
 	}
 }
 
+func TestWriteChromeTraceASCIIOnly(t *testing.T) {
+	// A stack deeper than the truncation limit (12) must still render as pure
+	// ASCII. Perfetto's JSON tokenizer is byte-oriented and rejects multi-byte
+	// UTF-8 (a "…" ellipsis) with json_parser_failure — and the marker only
+	// appears for deep stacks, so it slips through lighter traces.
+	frames := make([]synth.Frame, 20)
+	for i := range frames {
+		frames[i] = synth.Frame{Func: "main.deep", File: "d.go", Line: uint64(i + 1)}
+	}
+	pt := &synth.ParsedTrace{Events: []synth.Event{
+		{TS: 0, Kind: synth.KindGoState, Goroutine: 1, Name: "Waiting", Detail: "chan receive", Stack: frames},
+		{TS: 100, Kind: synth.KindGoState, Goroutine: 1, Name: "Running"},
+	}}
+
+	var buf bytes.Buffer
+	if err := emit.WriteChromeTrace(&buf, pt); err != nil {
+		t.Fatalf("WriteChromeTrace: %v", err)
+	}
+	for i, c := range buf.Bytes() {
+		if c > 0x7f {
+			t.Fatalf("non-ASCII byte 0x%02x at offset %d — Perfetto's JSON tokenizer rejects it", c, i)
+		}
+	}
+	if !strings.Contains(buf.String(), "more)") {
+		t.Error("expected an ASCII overflow marker for the deep stack")
+	}
+}
+
 func TestWriteChromeTraceEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	if err := emit.WriteChromeTrace(&buf, &synth.ParsedTrace{}); err != nil {
