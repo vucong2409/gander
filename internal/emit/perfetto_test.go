@@ -29,22 +29,20 @@ func TestWriteChromeTrace(t *testing.T) {
 		t.Fatalf("WriteChromeTrace: %v", err)
 	}
 
-	var got struct {
-		TraceEvents     []map[string]any `json:"traceEvents"`
-		DisplayTimeUnit string           `json:"displayTimeUnit"`
+	// JSON Array Format: the top level must be a bare array of events.
+	if b := bytes.TrimSpace(buf.Bytes()); len(b) == 0 || b[0] != '[' {
+		t.Fatalf("output must be a JSON array (Perfetto-compatible), got prefix %.20q", b)
 	}
-	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("output is not valid JSON: %v", err)
+	var events []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &events); err != nil {
+		t.Fatalf("output is not a valid JSON array: %v", err)
 	}
-	if got.DisplayTimeUnit != "ns" {
-		t.Errorf("displayTimeUnit = %q, want ns", got.DisplayTimeUnit)
-	}
-	if len(got.TraceEvents) == 0 {
+	if len(events) == 0 {
 		t.Fatal("no trace events emitted")
 	}
 
 	names, phs := map[string]int{}, map[string]int{}
-	for _, e := range got.TraceEvents {
+	for _, e := range events {
 		if n, ok := e["name"].(string); ok {
 			names[n]++
 		}
@@ -71,7 +69,7 @@ func TestWriteChromeTrace(t *testing.T) {
 	}
 
 	var laneNamed bool
-	for _, e := range got.TraceEvents {
+	for _, e := range events {
 		if e["name"] == "thread_name" {
 			if args, ok := e["args"].(map[string]any); ok {
 				if n, _ := args["name"].(string); strings.Contains(n, "pkg.worker") {
@@ -85,7 +83,7 @@ func TestWriteChromeTrace(t *testing.T) {
 	}
 
 	var reasoned bool
-	for _, e := range got.TraceEvents {
+	for _, e := range events {
 		if args, ok := e["args"].(map[string]any); ok {
 			if args["reason"] == "chan receive" {
 				reasoned = true
@@ -102,8 +100,12 @@ func TestWriteChromeTraceEmpty(t *testing.T) {
 	if err := emit.WriteChromeTrace(&buf, &synth.ParsedTrace{}); err != nil {
 		t.Fatalf("empty: %v", err)
 	}
-	var got map[string]any
+	// Must be an empty JSON array [], never null — Perfetto rejects null.
+	if b := bytes.TrimSpace(buf.Bytes()); string(b) != "[]" {
+		t.Fatalf("empty trace must encode as [], got %q", b)
+	}
+	var got []any
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("empty output is not valid JSON: %v", err)
+		t.Fatalf("empty output is not a valid JSON array: %v", err)
 	}
 }

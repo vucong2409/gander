@@ -8,7 +8,7 @@
 //	go run ./cmd/emit some/trace.bin -o fused.json
 //	go run ./cmd/emit some/trace.bin                       # -> stdout
 //
-// Open the output at https://ui.perfetto.org.
+// Open the output (fused.json) at https://ui.perfetto.dev.
 package main
 
 import (
@@ -63,8 +63,8 @@ func main() {
 	if dest == "" {
 		dest = "stdout"
 	}
-	fmt.Fprintf(os.Stderr, "emit: %d events from %s → %s (open in https://ui.perfetto.org)\n",
-		len(pt.Events), tracePath, dest)
+	fmt.Fprintf(os.Stderr, "emit: %d events from %s → %s\n", len(pt.Events), tracePath, dest)
+	fmt.Fprintf(os.Stderr, "emit: open %s at https://ui.perfetto.dev (load the .json, not trace.bin)\n", dest)
 }
 
 // resolvePaths derives the input trace.bin and output path. A directory is
