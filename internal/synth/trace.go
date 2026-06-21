@@ -30,8 +30,9 @@ type Unblock struct {
 type ParsedTrace struct {
 	Events   []Event
 	Unblocks []Unblock
-	Clock    *ClockRef // from the first Sync event; nil pre-go1.25
-	StartTS  int64     // trace-clock ns of the first non-sync event
+	GoNames  map[int64]string // GoID -> entry function, for legible lane labels
+	Clock    *ClockRef        // from the first Sync event; nil pre-go1.25
+	StartTS  int64            // trace-clock ns of the first non-sync event
 }
 
 // CountByKind tallies events by Kind — handy for diagnosis and tests.
@@ -54,7 +55,7 @@ func ParseTrace(r io.Reader) (*ParsedTrace, error) {
 		return nil, fmt.Errorf("new trace reader: %w", err)
 	}
 
-	pt := &ParsedTrace{}
+	pt := &ParsedTrace{GoNames: map[int64]string{}}
 	open := make(map[string]int64) // open range/region begins -> start ns
 	gotStart := false
 
@@ -95,6 +96,16 @@ func ParseTrace(r io.Reader) (*ParsedTrace, error) {
 					pt.Unblocks = append(pt.Unblocks, Unblock{TS: ts, Waker: waker, Woken: woken})
 				}
 			}
+			stk := framesOf(st.Stack)
+			// The root (last) frame is the goroutine's entry function — capture
+			// it once for a legible lane label.
+			if len(stk) > 0 {
+				if _, ok := pt.GoNames[woken]; !ok {
+					if fn := stk[len(stk)-1].Func; fn != "" {
+						pt.GoNames[woken] = fn
+					}
+				}
+			}
 			pt.Events = append(pt.Events, Event{
 				TS:        ts,
 				Kind:      KindGoState,
@@ -104,7 +115,7 @@ func ParseTrace(r io.Reader) (*ParsedTrace, error) {
 				Thread:    int64(ev.Thread()),
 				Name:      to.String(),
 				Detail:    from.String(),
-				Stack:     framesOf(st.Stack),
+				Stack:     stk,
 			})
 
 		case exptrace.EventRangeBegin, exptrace.EventRangeActive:

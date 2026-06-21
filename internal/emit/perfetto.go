@@ -15,6 +15,7 @@ import (
 	"io"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/vucong2409/gander/internal/synth"
 )
@@ -89,7 +90,7 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 	for _, g := range gids {
 		idxs := byG[g]
 		sort.Slice(idxs, func(a, b int) bool { return pt.Events[idxs[a]].TS < pt.Events[idxs[b]].TS })
-		lanes.mark(pidGoroutines, g, goName(g))
+		lanes.mark(pidGoroutines, g, goName(g, pt.GoNames))
 		for j, idx := range idxs {
 			e := &pt.Events[idx]
 			end := maxEnd
@@ -116,7 +117,7 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 			tid := int64(tidRuntime)
 			name := "GC / runtime"
 			if e.Goroutine != 0 {
-				tid, name = e.Goroutine, goName(e.Goroutine)
+				tid, name = e.Goroutine, goName(e.Goroutine, pt.GoNames)
 			}
 			lanes.mark(pidRuntime, tid, name)
 			ct.TraceEvents = append(ct.TraceEvents, chromeEvent{
@@ -124,7 +125,7 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 				TS: at(e.TS), Dur: durUS(e.Dur), PID: pidRuntime, TID: tid,
 			})
 		case synth.KindRegion:
-			lanes.mark(pidRegions, e.Goroutine, goName(e.Goroutine))
+			lanes.mark(pidRegions, e.Goroutine, goName(e.Goroutine, pt.GoNames))
 			ct.TraceEvents = append(ct.TraceEvents, chromeEvent{
 				Name: e.Name, Cat: "region", Ph: "X",
 				TS: at(e.TS), Dur: durUS(e.Dur), PID: pidRegions, TID: e.Goroutine,
@@ -156,7 +157,22 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 	return encode(w, ct)
 }
 
-func goName(g int64) string { return "G" + strconv.FormatInt(g, 10) }
+func goName(g int64, names map[int64]string) string {
+	label := "G" + strconv.FormatInt(g, 10)
+	if fn := names[g]; fn != "" {
+		label += " " + shortFunc(fn)
+	}
+	return label
+}
+
+// shortFunc trims the package path from a fully-qualified function name:
+// "github.com/x/y/pkg.Func" -> "pkg.Func".
+func shortFunc(fn string) string {
+	if i := strings.LastIndexByte(fn, '/'); i >= 0 {
+		return fn[i+1:]
+	}
+	return fn
+}
 
 func encode(w io.Writer, ct chromeTrace) error {
 	enc := json.NewEncoder(w)

@@ -58,6 +58,9 @@ func TestParseTrace(t *testing.T) {
 	if pt.Clock == nil {
 		t.Error("expected a clock snapshot from a go1.25 trace")
 	}
+	if len(pt.GoNames) == 0 {
+		t.Error("expected goroutine entry-function names")
+	}
 }
 
 func TestParseTraceInvalid(t *testing.T) {
