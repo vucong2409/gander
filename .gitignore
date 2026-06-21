@@ -19,6 +19,8 @@ profile.cov
 
 # Build / release output (GoReleaser, CI binaries)
 /dist/
+# local `go build .` output (the CLI builds to ./gander)
+/gander
 
 # gander capture bundles (runtime output)
 /bundles/
