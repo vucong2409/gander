@@ -117,6 +117,12 @@ for msg := range queue {
 
 Then inspect the bundles it writes with `gander emit` / `gander diag`.
 
+**Overhead.** Marking a work-unit (`Begin` + end) costs about **40 ns** with no
+trace running and **~200 ns** while the flight recorder is armed — one small
+allocation per unit (two while armed), no locks, no syscalls (linux/amd64; reproduce with
+`go test -bench=Begin -benchmem ./record`). At 100k work-units/sec the armed cost
+is roughly 2% of one core; below ~10k/sec it's in the noise.
+
 > **Heads up:** the `record` API is unit-tested but has **not** been run inside a
 > real production service yet, and both it and the findings format may still
 > change. Treat it as experimental.
