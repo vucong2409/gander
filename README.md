@@ -2,6 +2,13 @@
 
 **Find out _why_ your Go service stalled — automatically.**
 
+![gander's fused timeline in Perfetto — per-goroutine state lanes, GC, wake-up arrows, and the kernel's cgroup CPU-throttling and pressure counters, all aligned on one clock](docs/images/fused-timeline.png)
+
+> _One capture, every signal on the same timeline: the lanes are goroutine state
+> and GC; the tracks at the bottom are the kernel's CPU-throttling / pressure
+> counters — so a stall lines up with its cause at a glance. Produced by `gander
+> emit` and opened in [ui.perfetto.dev](https://ui.perfetto.dev)._
+
 When a unit of work in your program (a request, a loop iteration, a queued
 message) takes longer than it should, `gander` grabs a snapshot of everything
 happening at that moment — the Go execution trace, what the kernel was doing to
