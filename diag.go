@@ -1,7 +1,3 @@
-// Command diag reads a capture bundle and prints scored findings — gander's
-// "tell me what's wrong" layer. It writes findings.json beside the bundle.
-//
-//	go run ./cmd/diag bundles/20260101T000000.000-123
 package main
 
 import (
@@ -17,30 +13,38 @@ import (
 	"github.com/vucong2409/gander/internal/synth"
 )
 
-func main() {
-	flag.Parse()
-	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: diag <bundle-dir>")
-		os.Exit(2)
+// runDiag reads a capture bundle and prints scored findings — gander's "tell me
+// what's wrong" layer. It writes findings.json beside the bundle.
+//
+//	gander diag bundles/20260101T000000.000-123
+func runDiag(args []string) error {
+	fs := flag.NewFlagSet("diag", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
 	}
-	dir := flag.Arg(0)
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: gander diag <bundle-dir>")
+	}
+	dir := fs.Arg(0)
 
 	pt, err := loadTrace(filepath.Join(dir, "trace.bin"))
 	if err != nil {
-		fail(err)
+		return err
 	}
 	proc := loadProc(filepath.Join(dir, "proc.json"))
 	meta := loadMeta(filepath.Join(dir, "meta.json"))
 
 	findings := diag.Diagnose(pt, proc, meta)
-
 	if err := writeFindings(filepath.Join(dir, "findings.json"), findings); err != nil {
-		fail(err)
+		return err
 	}
 
 	if len(findings) == 0 {
 		fmt.Println("no findings — nothing exceeded its thresholds in this window")
-		return
+		return nil
 	}
 	for _, f := range findings {
 		fmt.Printf("[%-8s] %s\n            %s\n", f.Severity, f.Title, f.Evidence)
@@ -48,6 +52,7 @@ func main() {
 			fmt.Printf("            → %s\n", f.Suggestion)
 		}
 	}
+	return nil
 }
 
 func loadTrace(path string) (*synth.ParsedTrace, error) {
@@ -87,9 +92,4 @@ func writeFindings(path string, findings []diag.Finding) error {
 		return err
 	}
 	return os.WriteFile(path, append(b, '\n'), 0o644)
-}
-
-func fail(err error) {
-	fmt.Fprintln(os.Stderr, "diag:", err)
-	os.Exit(1)
 }

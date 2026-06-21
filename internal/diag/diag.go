@@ -10,6 +10,7 @@ package diag
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/vucong2409/gander/internal/bundle"
@@ -50,6 +51,7 @@ type Finding struct {
 func Diagnose(pt *synth.ParsedTrace, proc []collect.ProcSample, meta bundle.Meta) []Finding {
 	fs := []Finding{}
 	fs = append(fs, missedBudget(meta)...)
+	fs = append(fs, stalledWorkUnit(pt)...)
 	fs = append(fs, cfsThrottling(proc)...)
 	fs = append(fs, cpuPressure(proc)...)
 	fs = append(fs, gcPressure(pt)...)
@@ -82,6 +84,85 @@ func missedBudget(meta bundle.Meta) []Finding {
 		Evidence:   fmt.Sprintf("work-unit ran %.0fms (budget %.0fms)%s", elapsed, budget, over),
 		Suggestion: "the findings below point at the likely cause; open fused.json to see what the hot goroutine was doing in this window",
 	}}
+}
+
+// stalledWorkUnit finds the slowest instrumented work-unit (a "work-unit" trace
+// region) and reports the goroutine that ran it and what it blocked on — the
+// goid-aware "here's the culprit" finding, vs the aggregate block-reasons.
+func stalledWorkUnit(pt *synth.ParsedTrace) []Finding {
+	var best synth.Event
+	found := false
+	for i := range pt.Events {
+		if e := &pt.Events[i]; e.Kind == synth.KindRegion && e.Name == "work-unit" {
+			if !found || e.Dur > best.Dur {
+				best, found = *e, true
+			}
+		}
+	}
+	if !found || best.Dur <= 0 {
+		return nil
+	}
+	rs, re := best.TS, best.TS+best.Dur
+
+	idxs := []int{}
+	for i := range pt.Events {
+		if e := &pt.Events[i]; e.Kind == synth.KindGoState && e.Goroutine == best.Goroutine {
+			idxs = append(idxs, i)
+		}
+	}
+	sort.Slice(idxs, func(a, b int) bool { return pt.Events[idxs[a]].TS < pt.Events[idxs[b]].TS })
+
+	byReason := map[string]int64{}
+	for j, idx := range idxs {
+		e := &pt.Events[idx]
+		if e.Detail == "" {
+			continue
+		}
+		st, en := e.TS, re
+		if j+1 < len(idxs) {
+			en = pt.Events[idxs[j+1]].TS
+		}
+		if st < rs {
+			st = rs
+		}
+		if en > re {
+			en = re
+		}
+		if en > st {
+			byReason[e.Detail] += en - st
+		}
+	}
+
+	topReason, topNs := "", int64(0)
+	for r, n := range byReason {
+		if n > topNs {
+			topReason, topNs = r, n
+		}
+	}
+
+	g := "G" + strconv.FormatInt(best.Goroutine, 10)
+	if fn := pt.GoNames[best.Goroutine]; fn != "" {
+		g += " " + shortFn(fn)
+	}
+	ev := fmt.Sprintf("the slowest work-unit ran on %s for %.0fms", g, ms(best.Dur))
+	if topReason != "" {
+		ev += fmt.Sprintf("; it spent %.0fms blocked on %q", ms(topNs), topReason)
+	}
+	return []Finding{{
+		Rule:       "stalled-work-unit",
+		Severity:   sevWarn,
+		Title:      "the slowest work-unit and what blocked it",
+		Evidence:   ev,
+		Suggestion: "this goroutine and call drove the missed budget — open fused.json on this lane and window",
+	}}
+}
+
+// shortFn trims the package path from a fully-qualified function name.
+func shortFn(fn string) string {
+	if i := strings.LastIndexByte(fn, '/'); i >= 0 {
+		return fn[i+1:]
+	}
+	return fn
 }
 
 // cfsThrottling reports cgroup CPU throttling — the classic "slow despite

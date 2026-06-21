@@ -1,6 +1,7 @@
 package diag_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/vucong2409/gander/internal/bundle"
@@ -8,6 +9,34 @@ import (
 	"github.com/vucong2409/gander/internal/diag"
 	"github.com/vucong2409/gander/internal/synth"
 )
+
+func TestStalledWorkUnit(t *testing.T) {
+	pt := &synth.ParsedTrace{
+		GoNames: map[int64]string{1: "github.com/x/main.main"},
+		Events: []synth.Event{
+			{TS: 0, Dur: 40_000_000, Kind: synth.KindRegion, Name: "work-unit", Goroutine: 1}, // 40ms: the stall
+			{TS: 0, Kind: synth.KindGoState, Goroutine: 1, Name: "Waiting", Detail: "chan receive"},
+			{TS: 38_000_000, Kind: synth.KindGoState, Goroutine: 1, Name: "Running"},
+			{TS: 50_000_000, Dur: 1_000_000, Kind: synth.KindRegion, Name: "work-unit", Goroutine: 1}, // 1ms: fast
+		},
+	}
+	var swu *diag.Finding
+	for _, f := range diag.Diagnose(pt, nil, bundle.Meta{}) {
+		if f.Rule == "stalled-work-unit" {
+			f := f
+			swu = &f
+		}
+	}
+	if swu == nil {
+		t.Fatal("expected a stalled-work-unit finding")
+	}
+	if !strings.Contains(swu.Evidence, "main.main") {
+		t.Errorf("evidence should name the goroutine func: %q", swu.Evidence)
+	}
+	if !strings.Contains(swu.Evidence, "chan receive") {
+		t.Errorf("evidence should name the block reason: %q", swu.Evidence)
+	}
+}
 
 func TestDiagnose(t *testing.T) {
 	meta := bundle.Meta{Trigger: bundle.Trigger{
