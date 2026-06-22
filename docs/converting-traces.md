@@ -1,8 +1,9 @@
 # Converting a Go trace to the fused Perfetto view
 
 `gander emit` doubles as a standalone converter: it turns **any Go 1.25 execution
-trace** into the fused Perfetto timeline. It's a drop-in for gotraceui, whose
-parser does not read Go 1.25 traces.
+trace** into the fused Perfetto timeline. It's a stand-in for gotraceui, which
+currently panics on Go 1.25 traces
+([dominikh/gotraceui#184](https://github.com/dominikh/gotraceui/issues/184)).
 
 ## Usage
 
@@ -63,9 +64,11 @@ gander diag bundles/20260101T000000.000-123      # scored findings + findings.js
 findings depend on `proc.json` / `meta.json`, but the trace-derived findings —
 the stalled work-unit, GC pressure, block reasons — work from `trace.bin` alone.)
 
-## Why not gotraceui / `go tool trace`?
+## Why not gotraceui?
 
-gotraceui's trace parser lags Go releases and does not read Go 1.25 traces; `go
-tool trace`'s bundled viewer also breaks on recent Chrome. gander parses with
-`golang.org/x/exp/trace`, which is current, and renders to Perfetto — so the 1.25
-trace you can't open elsewhere opens here.
+gotraceui currently panics on Go 1.25 traces
+([dominikh/gotraceui#184](https://github.com/dominikh/gotraceui/issues/184),
+likely fixed in a future release). The panic is in gotraceui's own `ptrace`
+reconstruction layer; gander instead drives `golang.org/x/exp/trace`'s reader
+directly with a thin event mapping, so the 1.25 traces it chokes on convert here
+today. (gander has no dependency on gotraceui.)

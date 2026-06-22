@@ -146,21 +146,13 @@ is roughly 2% of one core; below ~10k/sec it's in the noise.
 ## Convert any Go trace
 
 `gander emit` doubles as a standalone converter: point it at **any Go 1.25
-execution trace** and it writes the fused Perfetto timeline beside it — a
-flight-recorder snapshot, `runtime/trace` output, a `go test -trace` file, or a
-`/debug/pprof/trace` capture. (gotraceui's parser doesn't read Go 1.25 traces
-yet; gander does.)
+execution trace** — a flight-recorder snapshot, `runtime/trace` output, a
+`go test -trace` file, or a `/debug/pprof/trace` capture — and it writes the fused
+Perfetto timeline beside it. You get every layer except the cgroup
+CPU-throttling/pressure counters, which need gander's live sampler.
 
-```bash
-gander emit trace.bin                                  # -> trace.fused.json
-go test -trace=t.bin ./... && gander emit t.bin        # -> t.fused.json
-curl 'localhost:6060/debug/pprof/trace?seconds=5' -o p.bin && gander emit p.bin
-```
-
-Open the `.json` at <https://ui.perfetto.dev>. You get every layer of the fused
-view except the cgroup CPU-throttling/pressure counters — those exist only if
-gander's sampler ran alongside the workload. See
-[`docs/converting-traces.md`](docs/converting-traces.md) for the full breakdown.
+See **[docs/converting-traces.md](docs/converting-traces.md)** for the commands,
+the supported trace sources, and the full layer breakdown.
 
 ## Status
 
