@@ -44,8 +44,10 @@ question — and none of them answers "what went wrong, _right at the slow momen
 
 > **gotraceui currently panics on Go 1.25 traces** — open issue
 > [dominikh/gotraceui#184](https://github.com/dominikh/gotraceui/issues/184)
-> (likely fixed in a future release). gander reads the same trace and converts it
-> to the Perfetto timeline today; see [Convert any Go trace](#convert-any-go-trace).
+> (likely fixed in a future release). gander reads Go 1.25 traces today and
+> converts them to the Perfetto timeline — it drives `x/exp/trace`'s reader
+> directly, not gotraceui's `ptrace` layer (where the panic is). See
+> [Convert any Go trace](#convert-any-go-trace).
 
 gander's niche is narrow on purpose: a **single process, on a single machine**,
 that catches a stall *as it happens* and explains it. It is **not** a fleet-wide
