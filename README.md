@@ -143,6 +143,39 @@ is roughly 2% of one core; below ~10k/sec it's in the noise.
 > real production service yet, and both it and the findings format may still
 > change. Treat it as experimental.
 
+## Capturing: choose your trigger
+
+Recording is always on once you `Start`; the *triggers* just decide when a bundle
+is written. Pick any combination (`Options.Triggers`, OR'd together) — and
+`Snapshot` / `Handler` are always available regardless.
+
+| Trigger | Fires when | Config | Reach for it when |
+|---|---|---|---|
+| `OnBudget` *(default)* | a `Begin`'d work-unit overruns its budget | `Budget` | you can mark work-units and want auto-capture on a latency miss |
+| `OnSignal` | the process gets a signal (`kill -USR1 <pid>`) | `Signal` | ops wants the last few seconds on demand, no code change |
+| `Continuous` | every `Interval`, keeping the last `Keep` | `Interval`, `Keep` | always-on rolling capture — never miss it |
+| `Snapshot(reason)` *(always on)* | you call it | — | from your own logic: a 5xx, a slow query, a breaker trip |
+| `Handler()` *(always on)* | an HTTP GET hits the endpoint | mount on a mux | pull a capture at runtime, à la `net/http/pprof` |
+
+`Options.Window` sets how far back each capture reaches (the flight-recorder
+look-back). `Begin` is only needed for `OnBudget` — the other triggers work with
+zero hot-path instrumentation.
+
+```go
+r, _ := record.Start(record.Options{
+    Triggers: record.OnSignal | record.Continuous,
+    Window:   5 * time.Second,
+    Interval: 30 * time.Second, Keep: 20,
+})
+defer r.Stop()
+
+mux.Handle("/debug/gander/", r.Handler())     // pull over HTTP, and/or…
+if slow { r.Snapshot("checkout p99 breach") } // …capture from your own code
+```
+
+See **[docs/triggers.md](docs/triggers.md)** for each trigger's behavior, overhead,
+and how they compare.
+
 ## Convert any Go trace
 
 `gander emit` doubles as a standalone converter: point it at **any Go 1.25
