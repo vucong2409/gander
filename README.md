@@ -42,6 +42,11 @@ question — and none of them answers "what went wrong, _right at the slow momen
 | **APM / dashboards** (Datadog, Grafana) | fleet-wide trends & request traces | ✅ sampled | ⚠️ partial | ⚠️ coarse, not down to a goroutine |
 | **gander** | one slow service, on one machine | ✅ **heartbeat trigger** | ✅ **no eBPF needed** | ✅ **deterministic findings** |
 
+> **gotraceui can't open Go 1.25 traces** (its parser lags each Go release), and
+> `go tool trace`'s bundled viewer is flaky on current browsers. gander reads the
+> trace anyway — via `golang.org/x/exp/trace` — and converts it to the Perfetto
+> timeline for you. See [Convert any Go trace](#convert-any-go-trace).
+
 gander's niche is narrow on purpose: a **single process, on a single machine**,
 that catches a stall *as it happens* and explains it. It is **not** a fleet-wide
 observability platform — it's what you reach for when one service is mysteriously
@@ -136,7 +141,7 @@ is roughly 2% of one core; below ~10k/sec it's in the noise.
 > real production service yet, and both it and the findings format may still
 > change. Treat it as experimental.
 
-## Convert any Go trace (flight recorder, `go test -trace`, pprof)
+## Convert any Go trace
 
 `gander emit` doubles as a standalone converter: point it at **any Go 1.25
 execution trace** and it writes the fused Perfetto timeline beside it — a
