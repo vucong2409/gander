@@ -44,6 +44,11 @@ type Options struct {
 	// route through your service's logger, or to log.New(io.Discard, ...) to
 	// silence.
 	Logger *log.Logger
+	// CPUSamples, when true, runs a concurrent CPU profile so bundles' traces
+	// include on-CPU stack samples (shown as per-goroutine sample markers in the
+	// fused view). It claims the process-wide CPU-profile slot and adds profiler
+	// overhead, so it defaults off.
+	CPUSamples bool
 }
 
 // Recorder is a running gander capture session. Construct one with Start.
@@ -85,7 +90,11 @@ func Start(opts Options) (*Recorder, error) {
 	r := &Recorder{proc: collect.NewProc()}
 	coord.Register(r.proc)
 
-	if tracer, err := collect.NewTrace(); err != nil {
+	var topts []collect.TraceOption
+	if opts.CPUSamples {
+		topts = append(topts, collect.WithCPUSamples())
+	}
+	if tracer, err := collect.NewTrace(topts...); err != nil {
 		logger.Printf("flight recorder unavailable, bundles will omit trace.bin: %v", err)
 	} else {
 		r.tracer = tracer

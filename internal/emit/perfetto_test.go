@@ -183,6 +183,93 @@ func TestWriteChromeTraceUXMarkers(t *testing.T) {
 	}
 }
 
+func TestWriteChromeTraceCPUSamples(t *testing.T) {
+	pt := &synth.ParsedTrace{Events: []synth.Event{
+		{TS: 0, Kind: synth.KindGoState, Goroutine: 1, Name: "Running"},
+		{TS: 50, Kind: synth.KindSample, Goroutine: 1, Stack: []synth.Frame{
+			{Func: "github.com/x/pkg.hotLoop", File: "h.go", Line: 9},
+			{Func: "main.main", File: "m.go", Line: 3},
+		}},
+		{TS: 60, Kind: synth.KindSample, Goroutine: 0}, // unattributed -> skipped
+	}}
+	var buf bytes.Buffer
+	if err := emit.WriteChromeTrace(&buf, pt); err != nil {
+		t.Fatal(err)
+	}
+	var events []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &events); err != nil {
+		t.Fatal(err)
+	}
+
+	var found, skippedUnattributed = false, true
+	for _, e := range events {
+		if e["cat"] != "sample" {
+			continue
+		}
+		if e["ph"] != "i" {
+			t.Errorf("sample should be an instant event, got ph=%v", e["ph"])
+		}
+		if e["tid"] == float64(0) {
+			skippedUnattributed = false // an unattributed sample leaked through
+		}
+		if e["name"] == "pkg.hotLoop" && e["tid"] == float64(1) {
+			args, _ := e["args"].(map[string]any)
+			if s, _ := args["stack"].(string); strings.Contains(s, "main.main") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("expected a CPU-sample marker on G1 with leaf func 'pkg.hotLoop' and full stack")
+	}
+	if !skippedUnattributed {
+		t.Error("samples with goroutine 0 should be skipped")
+	}
+}
+
+func TestThrottleOverlay(t *testing.T) {
+	mk := func(ts int64, usec float64) synth.Event {
+		return synth.Event{TS: ts, Kind: synth.KindMetric, Name: "cgroup.cpu.throttled_usec", Value: usec}
+	}
+	// throttled_usec rises 0 -> 5000 -> 12000 then flat: one throttled run of 12ms.
+	pt := &synth.ParsedTrace{Events: []synth.Event{
+		{TS: 0, Kind: synth.KindGoState, Goroutine: 1, Name: "Running"},
+		mk(0, 0), mk(100, 0), mk(200, 5000), mk(300, 12000), mk(400, 12000),
+	}}
+	var buf bytes.Buffer
+	if err := emit.WriteChromeTrace(&buf, pt); err != nil {
+		t.Fatal(err)
+	}
+	var events []map[string]any
+	_ = json.Unmarshal(buf.Bytes(), &events)
+
+	var lines []string
+	for _, e := range events {
+		if e["ph"] == "i" && e["s"] == "g" {
+			if n, _ := e["name"].(string); strings.HasPrefix(n, "CFS throttled") {
+				lines = append(lines, n)
+			}
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly 1 throttle overlay line, got %v", lines)
+	}
+	if !strings.Contains(lines[0], "12ms") {
+		t.Errorf("expected the run's throttled duration (12ms) in the label, got %q", lines[0])
+	}
+
+	// A flat (never-rising) series must produce no overlay.
+	flat := &synth.ParsedTrace{Events: []synth.Event{
+		{TS: 0, Kind: synth.KindGoState, Goroutine: 1, Name: "Running"},
+		mk(0, 0), mk(100, 0), mk(200, 0),
+	}}
+	buf.Reset()
+	_ = emit.WriteChromeTrace(&buf, flat)
+	if strings.Contains(buf.String(), "CFS throttled") {
+		t.Error("a flat throttled_usec series must not emit a throttle overlay")
+	}
+}
+
 func TestWriteChromeTraceEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	if err := emit.WriteChromeTrace(&buf, &synth.ParsedTrace{}); err != nil {

@@ -46,10 +46,11 @@ func runDemo(args []string) error {
 	// dump, and the heartbeat watchdog that auto-captures a bundle on a budget
 	// miss — is exactly the few lines a real service would add.
 	rec, err := record.Start(record.Options{
-		Budget:    *budget,
-		BundleDir: *bundleDir,
-		Cooldown:  *capCool,
-		Logger:    logger,
+		Budget:     *budget,
+		BundleDir:  *bundleDir,
+		Cooldown:   *capCool,
+		Logger:     logger,
+		CPUSamples: true, // the demo shows the on-CPU sample markers
 	})
 	if err != nil {
 		return err
