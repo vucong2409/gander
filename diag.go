@@ -2,10 +2,11 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/spf13/cobra"
 
 	"github.com/vucong2409/gander/internal/bundle"
 	"github.com/vucong2409/gander/internal/collect"
@@ -13,23 +14,21 @@ import (
 	"github.com/vucong2409/gander/internal/synth"
 )
 
-// runDiag reads a capture bundle and prints scored findings — gander's "tell me
-// what's wrong" layer. It writes findings.json beside the bundle.
-//
-//	gander diag bundles/20260101T000000.000-123
-func runDiag(args []string) error {
-	fs := flag.NewFlagSet("diag", flag.ContinueOnError)
-	if err := fs.Parse(args); err != nil {
-		if err == flag.ErrHelp {
-			return nil
-		}
-		return err
+func newDiagCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "diag <bundle-dir>",
+		Short: "Score a bundle into deterministic findings (what's wrong)",
+		Long: `diag reads a capture bundle and prints scored findings — gander's "tell me
+what's wrong" layer. It writes findings.json beside the bundle.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runDiag(args[0])
+		},
 	}
-	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: gander diag <bundle-dir>")
-	}
-	dir := fs.Arg(0)
+	return cmd
+}
 
+func runDiag(dir string) error {
 	pt, err := loadTrace(filepath.Join(dir, "trace.bin"))
 	if err != nil {
 		return err
