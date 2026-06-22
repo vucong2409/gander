@@ -75,6 +75,7 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 	lanes := newLaneSet()
 	activity := map[int64]int64{} // per-goroutine on-CPU ns, for lane ordering
 	var slowestWU *synth.Event    // the longest "work-unit" region — the stall
+	var throttle []throttleSample // cgroup throttled_usec samples, for the freeze overlay
 
 	// 1) Goroutine state transitions -> filled per-goroutine state lanes. The
 	// state a goroutine entered at transition i fills the gap until transition
@@ -171,6 +172,25 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 				TS: at(e.TS), PID: pidMetrics, TID: tidRuntime,
 				Args: map[string]any{"value": e.Value},
 			})
+			if e.Name == "cgroup.cpu.throttled_usec" {
+				throttle = append(throttle, throttleSample{ts: at(e.TS), usec: e.Value})
+			}
+		case synth.KindSample:
+			// CPU stack sample -> an instant marker on the sampled goroutine's
+			// lane (leaf function as the label, full stack in args), so you can
+			// see what was on-CPU right next to its state.
+			if e.Goroutine == 0 {
+				continue
+			}
+			lanes.mark(pidGoroutines, e.Goroutine, goName(e.Goroutine, pt.GoNames))
+			ev := chromeEvent{
+				Name: sampleName(e.Stack), Cat: "sample", Ph: "i", S: "t",
+				TS: at(e.TS), PID: pidGoroutines, TID: e.Goroutine,
+			}
+			if s := stackString(e.Stack); s != "" {
+				ev.Args = map[string]any{"stack": s}
+			}
+			events = append(events, ev)
 		}
 	}
 
@@ -195,9 +215,56 @@ func WriteChromeTrace(w io.Writer, pt *synth.ParsedTrace) error {
 		})
 	}
 
+	// CFS-throttle overlay: a global vertical line at the start of each throttled
+	// run (the kernel froze the whole process here), labeled with the duration.
+	events = append(events, throttleOverlay(throttle)...)
+
 	events = append(events, lanes.metadata()...)
 	events = append(events, sortIndexEvents(activity)...) // busiest goroutines on top
 	return encode(w, events)
+}
+
+// sampleName returns the leaf function (top frame) of a CPU sample's stack,
+// trimmed of its package path, for the marker label.
+func sampleName(frames []synth.Frame) string {
+	if len(frames) == 0 {
+		return "sample"
+	}
+	return shortFunc(frames[0].Func)
+}
+
+type throttleSample struct {
+	ts   float64 // microseconds on the normalized timeline
+	usec float64 // cumulative cgroup throttled_usec
+}
+
+// throttleOverlay coalesces throttled intervals (where cumulative throttled_usec
+// rose) into runs and emits one global vertical line at each run's start,
+// labeled with the throttled duration — so a kernel freeze shows across every
+// lane, like the STW overlay.
+func throttleOverlay(s []throttleSample) []chromeEvent {
+	if len(s) < 2 {
+		return nil
+	}
+	sort.Slice(s, func(i, j int) bool { return s[i].ts < s[j].ts })
+	var out []chromeEvent
+	for i := 1; i < len(s); {
+		if s[i].usec <= s[i-1].usec {
+			i++
+			continue
+		}
+		start := i - 1
+		for i < len(s) && s[i].usec > s[i-1].usec {
+			i++
+		}
+		deltaMs := (s[i-1].usec - s[start].usec) / 1000.0
+		out = append(out, chromeEvent{
+			Name: fmt.Sprintf("CFS throttled (%.0fms)", deltaMs),
+			Cat:  "throttle", Ph: "i", S: "g",
+			TS: s[start].ts, PID: pidMetrics, TID: tidRuntime,
+		})
+	}
+	return out
 }
 
 // isGCStopTheWorld reports whether a runtime range is a real GC stop-the-world
