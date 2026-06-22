@@ -2,39 +2,45 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
 
 	"github.com/vucong2409/gander/internal/collect"
 	"github.com/vucong2409/gander/internal/emit"
 	"github.com/vucong2409/gander/internal/synth"
 )
 
-// runEmit converts a captured execution trace into a Perfetto-loadable Chrome
-// JSON trace — the "see the fused view" step. Point it at a capture bundle (it
-// finds trace.bin and writes fused.json beside it) or directly at a trace.bin:
-//
-//	gander emit bundles/20260101T000000.000-123   # -> bundles/.../fused.json
-//	gander emit some/trace.bin -o fused.json
-//	gander emit some/trace.bin                     # -> stdout
-//
-// Open the output (fused.json) at https://ui.perfetto.dev.
-func runEmit(args []string) error {
-	fs := flag.NewFlagSet("emit", flag.ContinueOnError)
-	out := fs.String("o", "", "output path (default: <bundle>/fused.json, or stdout for a trace.bin)")
-	if err := fs.Parse(args); err != nil {
-		if err == flag.ErrHelp {
-			return nil
-		}
-		return err
-	}
-	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: gander emit [-o out.json] <bundle-dir | trace.bin>")
-	}
+func newEmitCmd() *cobra.Command {
+	var out string
+	cmd := &cobra.Command{
+		Use:   "emit <bundle-dir | trace.bin>",
+		Short: "Render a trace as a Perfetto timeline (fused.json)",
+		Long: `emit converts a captured bundle or a bare Go execution trace into a
+Perfetto-loadable Chrome JSON timeline.
 
-	tracePath, procPath, outPath, err := resolvePaths(fs.Arg(0), *out)
+Point it at a capture bundle (it finds trace.bin and writes fused.json beside it)
+or directly at any Go 1.25 trace .bin — a flight-recorder snapshot, runtime/trace
+output, "go test -trace", or /debug/pprof/trace. Open the result at
+https://ui.perfetto.dev.
+
+By default the output is written next to the input: <bundle>/fused.json, or
+<trace>.fused.json for a bare trace file. Pass "-o -" to write to stdout.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runEmit(args[0], out)
+		},
+	}
+	cmd.Flags().StringVarP(&out, "out", "o", "",
+		`output path (default: <bundle>/fused.json or <trace>.fused.json; "-" = stdout)`)
+	return cmd
+}
+
+func runEmit(in, out string) error {
+	tracePath, procPath, outPath, err := resolvePaths(in, out)
 	if err != nil {
 		return err
 	}
@@ -62,18 +68,19 @@ func runEmit(args []string) error {
 		return err
 	}
 
-	dest := outPath
-	if dest == "" {
-		dest = "stdout"
+	if outPath == "-" {
+		fmt.Fprintf(os.Stderr, "gander emit: %d events from %s → stdout\n", len(pt.Events), tracePath)
+		return nil
 	}
-	fmt.Fprintf(os.Stderr, "gander emit: %d events from %s → %s\n", len(pt.Events), tracePath, dest)
-	fmt.Fprintf(os.Stderr, "gander emit: open %s at https://ui.perfetto.dev (load the .json, not trace.bin)\n", dest)
+	fmt.Fprintf(os.Stderr, "gander emit: %d events from %s → %s\n", len(pt.Events), tracePath, outPath)
+	fmt.Fprintf(os.Stderr, "gander emit: open %s at https://ui.perfetto.dev\n", outPath)
 	return nil
 }
 
 // resolvePaths derives the input trace.bin and output path. A directory is
-// treated as a bundle (trace.bin inside, fused.json written beside it); a file
-// is used as-is, defaulting to stdout when no -o is given.
+// treated as a bundle (trace.bin inside, fused.json written beside it); a bare
+// trace file is used as-is, with output defaulting to <trace>.fused.json next to
+// it. An explicit out of "-" means stdout and is passed through unchanged.
 func resolvePaths(in, out string) (tracePath, procPath, outPath string, err error) {
 	info, err := os.Stat(in)
 	if err != nil {
@@ -93,7 +100,16 @@ func resolvePaths(in, out string) (tracePath, procPath, outPath string, err erro
 		}
 		return tracePath, procPath, out, nil
 	}
+	if out == "" {
+		out = fusedPathFor(in)
+	}
 	return in, "", out, nil
+}
+
+// fusedPathFor derives "<trace>.fused.json" from a trace file path, e.g.
+// "x/trace.bin" -> "x/trace.fused.json", "x/t" -> "x/t.fused.json".
+func fusedPathFor(in string) string {
+	return strings.TrimSuffix(in, filepath.Ext(in)) + ".fused.json"
 }
 
 // mergeProc loads cgroup/PSI samples from proc.json and adds them as clock-
@@ -115,9 +131,9 @@ func mergeProc(pt *synth.ParsedTrace, path string) (int, error) {
 	return len(samples), nil
 }
 
-// writeOut writes the emitted trace to outPath, or to stdout when empty.
+// writeOut writes the emitted trace to outPath, or to stdout when outPath is "-".
 func writeOut(outPath string, pt *synth.ParsedTrace) error {
-	if outPath == "" {
+	if outPath == "-" {
 		return emit.WriteChromeTrace(os.Stdout, pt)
 	}
 	of, err := os.Create(outPath)

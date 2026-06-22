@@ -35,10 +35,17 @@ question — and none of them answers "what went wrong, _right at the slow momen
 | Tool | Good at | Catches the stall on its own? | Sees kernel CPU throttling / pressure? | Tells you the cause? |
 |------|---------|:---:|:---:|:---:|
 | **pprof** | where CPU/memory goes *on average* | ❌ you sample manually | ❌ | ❌ aggregates, no timeline |
+| **Parca / Pyroscope** (continuous profiling) | CPU/memory over time, fleet-wide | ✅ always-on, sampled | ❌ | ❌ aggregates, no per-stall timeline |
 | **go tool trace** / gotraceui | reading one captured trace | ❌ you capture by hand | ❌ | ❌ you interpret it yourself |
 | **eBPF tools** (bcc, bpftrace) | kernel scheduling / off-CPU waits | ⚠️ if you script it | ✅ | ❌ blind to on-CPU stalls (e.g. GC) |
+| **Odigos** (eBPF auto-instrumentation) | zero-code distributed traces (OTel) | ✅ continuous | ⚠️ only as side metrics | ⚠️ span level, not per-goroutine |
 | **APM / dashboards** (Datadog, Grafana) | fleet-wide trends & request traces | ✅ sampled | ⚠️ partial | ⚠️ coarse, not down to a goroutine |
 | **gander** | one slow service, on one machine | ✅ **heartbeat trigger** | ✅ **no eBPF needed** | ✅ **deterministic findings** |
+
+> **gotraceui can't open Go 1.25 traces** (its parser lags each Go release), and
+> `go tool trace`'s bundled viewer is flaky on current browsers. gander reads the
+> trace anyway — via `golang.org/x/exp/trace` — and converts it to the Perfetto
+> timeline for you. See [Convert any Go trace](#convert-any-go-trace).
 
 gander's niche is narrow on purpose: a **single process, on a single machine**,
 that catches a stall *as it happens* and explains it. It is **not** a fleet-wide
@@ -133,6 +140,25 @@ is roughly 2% of one core; below ~10k/sec it's in the noise.
 > **Heads up:** the `record` API is unit-tested but has **not** been run inside a
 > real production service yet, and both it and the findings format may still
 > change. Treat it as experimental.
+
+## Convert any Go trace
+
+`gander emit` doubles as a standalone converter: point it at **any Go 1.25
+execution trace** and it writes the fused Perfetto timeline beside it — a
+flight-recorder snapshot, `runtime/trace` output, a `go test -trace` file, or a
+`/debug/pprof/trace` capture. (gotraceui's parser doesn't read Go 1.25 traces
+yet; gander does.)
+
+```bash
+gander emit trace.bin                                  # -> trace.fused.json
+go test -trace=t.bin ./... && gander emit t.bin        # -> t.fused.json
+curl 'localhost:6060/debug/pprof/trace?seconds=5' -o p.bin && gander emit p.bin
+```
+
+Open the `.json` at <https://ui.perfetto.dev>. You get every layer of the fused
+view except the cgroup CPU-throttling/pressure counters — those exist only if
+gander's sampler ran alongside the workload. See
+[`docs/converting-traces.md`](docs/converting-traces.md) for the full breakdown.
 
 ## Status
 
