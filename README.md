@@ -42,10 +42,10 @@ question — and none of them answers "what went wrong, _right at the slow momen
 | **APM / dashboards** (Datadog, Grafana) | fleet-wide trends & request traces | ✅ sampled | ⚠️ partial | ⚠️ coarse, not down to a goroutine |
 | **gander** | one slow service, on one machine | ✅ **heartbeat trigger** | ✅ **no eBPF needed** | ✅ **deterministic findings** |
 
-> **gotraceui can't open Go 1.25 traces** (its parser lags each Go release), and
-> `go tool trace`'s bundled viewer is flaky on current browsers. gander reads the
-> trace anyway — via `golang.org/x/exp/trace` — and converts it to the Perfetto
-> timeline for you. See [Convert any Go trace](#convert-any-go-trace).
+> **gotraceui currently panics on Go 1.25 traces** — open issue
+> [dominikh/gotraceui#184](https://github.com/dominikh/gotraceui/issues/184)
+> (likely fixed in a future release). gander reads the same trace and converts it
+> to the Perfetto timeline today; see [Convert any Go trace](#convert-any-go-trace).
 
 gander's niche is narrow on purpose: a **single process, on a single machine**,
 that catches a stall *as it happens* and explains it. It is **not** a fleet-wide
